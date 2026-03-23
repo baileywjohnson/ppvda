@@ -1,0 +1,83 @@
+import { generateWireGuardKeys } from './keys.js';
+import { getAccessToken, createDevice, removeDevice, getRelayList, findRelay } from './api.js';
+import {
+  generateWgConfig,
+  startTunnel,
+  stopTunnel,
+  saveDeviceInfo,
+  loadDeviceInfo,
+} from './wireguard.js';
+import type { MullvadConfig, DeviceInfo } from './types.js';
+import type { Logger } from 'pino';
+
+let activeDevice: DeviceInfo | null = null;
+let activeConfig: MullvadConfig | null = null;
+
+/**
+ * Set up a Mullvad VPN connection via WireGuard.
+ *
+ * Flow:
+ * 1. Check for a cached device (from a previous run)
+ * 2. If no cached device, generate keys and register with Mullvad
+ * 3. Fetch relay list and pick a server matching the requested location
+ * 4. Generate WireGuard config and bring up the tunnel
+ */
+export async function setupMullvad(config: MullvadConfig, logger: Logger): Promise<void> {
+  activeConfig = config;
+
+  // Try to reuse a previously registered device
+  let device = await loadDeviceInfo(config.configDir);
+
+  if (device) {
+    logger.info('Reusing cached Mullvad device');
+  } else {
+    logger.info('Registering new Mullvad device...');
+
+    const token = await getAccessToken(config.accountNumber);
+    const keys = generateWireGuardKeys();
+    device = await createDevice(token, keys);
+
+    await saveDeviceInfo(config.configDir, device);
+    logger.info('Mullvad device registered');
+  }
+
+  activeDevice = device;
+
+  // Fetch relay list and find matching server
+  logger.info('Finding Mullvad relay...');
+  const relays = await getRelayList();
+  const { server } = findRelay(relays, config.location);
+
+  // Generate config and start tunnel
+  const wgConfig = generateWgConfig(device, server);
+  await startTunnel(config.configDir, wgConfig);
+
+  logger.info('WireGuard tunnel is up — all traffic routed through Mullvad');
+}
+
+/**
+ * Tear down the Mullvad VPN connection.
+ * Optionally removes the device from the Mullvad account.
+ */
+export async function teardownMullvad(
+  logger: Logger,
+  opts: { removeDevice: boolean } = { removeDevice: false },
+): Promise<void> {
+  if (!activeConfig) return;
+
+  await stopTunnel(activeConfig.configDir);
+  logger.info('WireGuard tunnel stopped');
+
+  if (opts.removeDevice && activeDevice && activeConfig) {
+    try {
+      const token = await getAccessToken(activeConfig.accountNumber);
+      await removeDevice(token, activeDevice.id);
+      logger.info('Mullvad device removed');
+    } catch {
+      logger.warn('Failed to remove Mullvad device (non-fatal)');
+    }
+  }
+
+  activeDevice = null;
+  activeConfig = null;
+}

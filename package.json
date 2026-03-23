@@ -1,0 +1,31 @@
+{
+  "name": "ppvda",
+  "version": "0.1.0",
+  "description": "Pretty Private Video Download Assistant — server-side video URL extraction and download through VPN/proxy",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "private": true,
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "dotenv": "^17.3.1",
+    "fastify": "^5.8.4",
+    "https-proxy-agent": "^8.0.0",
+    "nanoid": "^5.1.7",
+    "pino": "^10.3.1",
+    "playwright": "^1.58.2",
+    "socks-proxy-agent": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

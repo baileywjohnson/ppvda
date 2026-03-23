@@ -1,0 +1,48 @@
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+export interface AppConfig {
+  port: number;
+  host: string;
+  proxyUrl: string | undefined;
+  downloadDir: string;
+  browserTimeoutMs: number;
+  networkIdleMs: number;
+  downloadTimeoutMs: number;
+  ffmpegPath: string;
+  maxConcurrentDownloads: number;
+  logLevel: string;
+  mullvadAccount: string | undefined;
+  mullvadLocation: string | undefined;
+  mullvadConfigDir: string;
+  preferredHosts: string[];
+  blockedHosts: string[];
+  allowedHosts: string[];
+}
+
+function parseHostList(value: string | undefined): string[] {
+  if (!value) return [];
+  return value.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+}
+
+export function loadConfig(): AppConfig {
+  return Object.freeze({
+    port: parseInt(process.env.PORT ?? '3000', 10),
+    host: process.env.HOST ?? '0.0.0.0',
+    proxyUrl: process.env.PROXY_URL || undefined,
+    downloadDir: process.env.DOWNLOAD_DIR ?? './downloads',
+    browserTimeoutMs: parseInt(process.env.BROWSER_TIMEOUT_MS ?? '30000', 10),
+    networkIdleMs: parseInt(process.env.NETWORK_IDLE_MS ?? '5000', 10),
+    downloadTimeoutMs: parseInt(process.env.DOWNLOAD_TIMEOUT_MS ?? '300000', 10),
+    ffmpegPath: process.env.FFMPEG_PATH ?? 'ffmpeg',
+    maxConcurrentDownloads: parseInt(process.env.MAX_CONCURRENT_DOWNLOADS ?? '3', 10),
+    logLevel: process.env.LOG_LEVEL ?? 'info',
+    mullvadAccount: process.env.MULLVAD_ACCOUNT || undefined,
+    mullvadLocation: process.env.MULLVAD_LOCATION || undefined,
+    mullvadConfigDir: process.env.MULLVAD_CONFIG_DIR ?? './mullvad',
+    preferredHosts: parseHostList(process.env.PREFERRED_HOSTS),
+    blockedHosts: parseHostList(process.env.BLOCKED_HOSTS),
+    allowedHosts: parseHostList(process.env.ALLOWED_HOSTS),
+  });
+}

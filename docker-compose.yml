@@ -1,0 +1,20 @@
+services:
+  ppvda:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - PROXY_URL=${PROXY_URL:-}
+      - MULLVAD_ACCOUNT=${MULLVAD_ACCOUNT:-}
+      - MULLVAD_LOCATION=${MULLVAD_LOCATION:-}
+      - LOG_LEVEL=debug
+    volumes:
+      - ./downloads:/app/downloads
+      - ./mullvad:/app/mullvad
+    # Required for WireGuard tunnel (Mullvad)
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
