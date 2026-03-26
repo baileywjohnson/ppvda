@@ -32,6 +32,8 @@ export interface AppConfig {
   drkUploadTimeoutMs: number;
   // Jobs
   maxJobHistory: number;
+  // Features
+  enableThumbnails: boolean;
 }
 
 function parseHostList(value: string | undefined): string[] {
@@ -69,5 +71,7 @@ export function loadConfig(): AppConfig {
     drkUploadTimeoutMs: parseInt(process.env.DRK_UPLOAD_TIMEOUT_MS ?? '600000', 10),
     // Jobs
     maxJobHistory: parseInt(process.env.MAX_JOB_HISTORY ?? '100', 10),
+    // Features
+    enableThumbnails: process.env.ENABLE_THUMBNAILS === 'true',
   });
 }

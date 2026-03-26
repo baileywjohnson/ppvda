@@ -6,13 +6,26 @@
   const appView = $('#app-view');
   const loginForm = $('#login-form');
   const loginError = $('#login-error');
+  const submitSection = $('#submit-section');
   const submitForm = $('#submit-form');
+  const extractError = $('#extract-error');
+  const resultsSection = $('#results-section');
+  const resultsList = $('#results-list');
+  const resultsTitle = $('#results-title');
+  const backBtn = $('#back-btn');
   const jobsList = $('#jobs-list');
   const logoutBtn = $('#logout-btn');
 
   let token = localStorage.getItem('ppvda_token');
   let eventSource = null;
-  const jobs = new Map(); // id -> job data
+  const jobs = new Map();
+
+  // Feature flags (fetched from server)
+  let enableThumbnails = false;
+  let darkreelEnabled = false;
+
+  // Extraction results (in-memory only, never persisted)
+  let extractionResult = null;
 
   // --- Init ---
   if (token) {
@@ -59,14 +72,10 @@
 
   logoutBtn.addEventListener('click', async () => {
     await fetch('/auth/logout', { method: 'POST' }).catch(() => {});
-    token = null;
-    localStorage.removeItem('ppvda_token');
-    if (eventSource) { eventSource.close(); eventSource = null; }
-    jobs.clear();
-    showLogin();
+    logout();
   });
 
-  // --- Submit ---
+  // --- Extract ---
   submitForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const urlInput = $('#video-url');
@@ -75,26 +84,181 @@
     if (!url) return;
 
     btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Extracting...';
+    extractError.hidden = true;
+
     try {
-      const res = await api('/jobs', {
+      const res = await api('/extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
       });
 
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        if (data.error === 'Unauthorized') { logout(); return; }
+        extractError.textContent = data.error || 'Extraction failed';
+        extractError.hidden = false;
+        return;
+      }
+
+      extractionResult = data.data;
+      urlInput.value = '';
+      showResults();
+    } catch {
+      extractError.textContent = 'Connection failed';
+      extractError.hidden = false;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Extract';
+    }
+  });
+
+  // --- Back button ---
+  backBtn.addEventListener('click', () => {
+    extractionResult = null;
+    hideResults();
+  });
+
+  // --- Results rendering ---
+  function showResults() {
+    submitSection.hidden = true;
+    resultsSection.hidden = false;
+
+    const videos = extractionResult?.videos ?? [];
+    const title = extractionResult?.pageTitle;
+    resultsTitle.textContent = title
+      ? `${videos.length} video${videos.length !== 1 ? 's' : ''} found`
+      : 'Extracted Videos';
+
+    if (videos.length === 0) {
+      resultsList.innerHTML = '<p class="empty">No videos found on this page</p>';
+      return;
+    }
+
+    resultsList.innerHTML = videos.map((v, i) => {
+      let domain = '';
+      try { domain = new URL(v.url).hostname; } catch {}
+
+      const thumbHtml = enableThumbnails
+        ? `<img class="video-thumb" loading="lazy" src="/thumbnail?videoUrl=${encodeURIComponent(v.url)}" alt="" width="160" height="90" onerror="this.style.display='none'">`
+        : '';
+
+      const qualityBadge = v.quality
+        ? `<span class="quality-badge">${esc(v.quality)}</span>`
+        : '';
+
+      const uploadBtn = darkreelEnabled
+        ? `<button class="btn-upload" data-idx="${i}">Upload to Darkreel</button>`
+        : '';
+
+      return `
+        <div class="video-card">
+          ${thumbHtml}
+          <div class="video-info">
+            <div class="video-badges">
+              <span class="type-badge badge-${esc(v.type)}">${esc(v.type)}</span>
+              ${qualityBadge}
+              ${v.fileExtension ? `<span class="quality-badge">${esc(v.fileExtension)}</span>` : ''}
+            </div>
+            <div class="video-domain">${esc(domain)}</div>
+            <div class="video-actions">
+              <button class="btn-download" data-idx="${i}">Download</button>
+              ${uploadBtn}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    // Attach action handlers
+    resultsList.querySelectorAll('.btn-download').forEach((btn) => {
+      btn.addEventListener('click', () => handleDownload(btn));
+    });
+    resultsList.querySelectorAll('.btn-upload').forEach((btn) => {
+      btn.addEventListener('click', () => handleUpload(btn));
+    });
+  }
+
+  function hideResults() {
+    resultsSection.hidden = true;
+    submitSection.hidden = false;
+    resultsList.innerHTML = '';
+  }
+
+  // --- Download to browser ---
+  async function handleDownload(btn) {
+    const idx = parseInt(btn.dataset.idx, 10);
+    const video = extractionResult?.videos?.[idx];
+    if (!video) return;
+
+    btn.disabled = true;
+    btn.className = 'btn-downloading';
+    btn.textContent = 'Downloading...';
+
+    try {
+      const res = await api('/stream-download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ videoUrl: video.url }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || 'Download failed');
+        return;
+      }
+
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'video.mp4';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+
+      btn.textContent = 'Downloaded';
+    } catch {
+      alert('Download failed');
+    } finally {
+      btn.disabled = false;
+      btn.className = 'btn-download';
+      setTimeout(() => { btn.textContent = 'Download'; }, 3000);
+    }
+  }
+
+  // --- Upload to Darkreel ---
+  async function handleUpload(btn) {
+    const idx = parseInt(btn.dataset.idx, 10);
+    const video = extractionResult?.videos?.[idx];
+    if (!video) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Submitting...';
+
+    try {
+      const res = await api('/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ videoUrl: video.url }),
+      });
+
       if (res.ok) {
-        urlInput.value = '';
+        btn.textContent = 'Submitted';
       } else {
         const data = await res.json().catch(() => ({}));
         if (data.error === 'Unauthorized') { logout(); return; }
         alert(data.error || 'Failed to create job');
+        btn.disabled = false;
+        btn.textContent = 'Upload to Darkreel';
       }
     } catch {
       alert('Connection failed');
-    } finally {
       btn.disabled = false;
+      btn.textContent = 'Upload to Darkreel';
     }
-  });
+  }
 
   // --- SSE ---
   function connectSSE() {
@@ -104,7 +268,6 @@
     eventSource.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
-        // Could be a full job (from initial state) or an event
         const id = data.id || data.jobId;
         if (!id) return;
 
@@ -115,12 +278,11 @@
     };
 
     eventSource.onerror = () => {
-      // EventSource auto-reconnects by default; only close on persistent failure
       console.warn('SSE connection error');
     };
   }
 
-  // --- Render ---
+  // --- Jobs rendering ---
   function renderJobs() {
     const sorted = [...jobs.values()].sort(
       (a, b) => new Date(b.createdAt || b.updatedAt || 0).getTime() -
@@ -156,7 +318,7 @@
     if (job.format) parts.push(job.format.toUpperCase());
     if (job.fileSize) parts.push(formatSize(job.fileSize));
     if (job.durationSec) parts.push(formatDuration(job.durationSec));
-    return parts.join(' · ');
+    return parts.join(' \u00b7 ');
   }
 
   // --- Helpers ---
@@ -179,23 +341,37 @@
     }
   }
 
+  async function fetchConfig() {
+    try {
+      const res = await api('/config');
+      if (res.ok) {
+        const data = await res.json();
+        enableThumbnails = data.enableThumbnails ?? false;
+        darkreelEnabled = data.darkreelEnabled ?? false;
+      }
+    } catch { /* defaults are fine */ }
+  }
+
   function showLogin() {
     loginView.hidden = false;
     appView.hidden = true;
   }
 
-  function showApp() {
+  async function showApp() {
     loginView.hidden = true;
     appView.hidden = false;
+    await fetchConfig();
     renderJobs();
     try { connectSSE(); } catch (err) { console.error('SSE connect error:', err); }
   }
 
   function logout() {
     token = null;
+    extractionResult = null;
     localStorage.removeItem('ppvda_token');
     if (eventSource) { eventSource.close(); eventSource = null; }
     jobs.clear();
+    hideResults();
     showLogin();
   }
 

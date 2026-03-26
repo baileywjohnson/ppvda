@@ -26,8 +26,17 @@
     <section id="submit-section">
       <form id="submit-form">
         <input type="url" id="video-url" placeholder="Paste video page URL..." required>
-        <button type="submit">Download</button>
+        <button type="submit">Extract</button>
       </form>
+      <p id="extract-error" class="error" hidden></p>
+    </section>
+
+    <section id="results-section" hidden>
+      <div id="results-header">
+        <button id="back-btn" class="btn-back">Back</button>
+        <h2 id="results-title">Extracted Videos</h2>
+      </div>
+      <div id="results-list"></div>
     </section>
 
     <section id="jobs-section">

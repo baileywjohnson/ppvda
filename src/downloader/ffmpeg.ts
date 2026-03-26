@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { FfmpegError, TimeoutError } from '../utils/errors.js';
 import type { ProxyConfig } from '../proxy/types.js';
 import { getFfmpegEnv } from '../proxy/index.js';
@@ -82,4 +83,60 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
       }
     });
   });
+}
+
+export interface FfmpegStreamOptions {
+  inputUrl: string;
+  ffmpegPath: string;
+  args?: string[];
+  proxyConfig?: ProxyConfig;
+  timeoutMs?: number;
+}
+
+/**
+ * Spawn ffmpeg with output piped to stdout. The caller is responsible for
+ * piping proc.stdout to its destination (e.g., an HTTP response).
+ *
+ * Default args remux to fragmented MP4 (streamable, modifies file hash).
+ * Pass custom `args` to override (e.g., for thumbnail extraction).
+ */
+export function spawnFfmpegStream(options: FfmpegStreamOptions): {
+  proc: ChildProcess;
+  stdout: Readable;
+  kill: () => void;
+} {
+  const { inputUrl, ffmpegPath, proxyConfig, timeoutMs = 300000 } = options;
+
+  const args = options.args ?? [
+    '-y',
+    '-i', inputUrl,
+    '-c', 'copy',
+    '-movflags', 'frag_keyframe+empty_moov',
+    '-f', 'mp4',
+    'pipe:1',
+  ];
+
+  const env: Record<string, string> = { ...process.env as Record<string, string> };
+  if (proxyConfig) {
+    Object.assign(env, getFfmpegEnv(proxyConfig));
+  }
+
+  const proc = spawn(ffmpegPath, args, {
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const timer = setTimeout(() => {
+    proc.kill('SIGKILL');
+  }, timeoutMs);
+
+  const cleanup = () => { clearTimeout(timer); };
+  proc.on('close', cleanup);
+  proc.on('error', cleanup);
+
+  return {
+    proc,
+    stdout: proc.stdout as Readable,
+    kill: () => { clearTimeout(timer); proc.kill('SIGKILL'); },
+  };
 }

@@ -13,6 +13,8 @@ import { healthRoutes } from './routes/health.js';
 import { extractRoutes } from './routes/extract.js';
 import { downloadRoutes } from './routes/download.js';
 import { jobRoutes } from './routes/jobs.js';
+import { streamDownloadRoutes } from './routes/stream-download.js';
+import { thumbnailRoutes } from './routes/thumbnail.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -43,7 +45,7 @@ export async function buildApp(config: AppConfig) {
 
   // SPA fallback — serve index.html for non-API, non-file routes
   app.setNotFoundHandler((request, reply) => {
-    if (request.url.startsWith('/api/') || request.url.startsWith('/auth/') || request.url.startsWith('/jobs')) {
+    if (request.url.startsWith('/api/') || request.url.startsWith('/auth/') || request.url.startsWith('/jobs') || request.url.startsWith('/stream-download') || request.url.startsWith('/thumbnail') || request.url.startsWith('/config')) {
       reply.status(404).send({ success: false, error: 'Not found' });
     } else {
       reply.sendFile('index.html');
@@ -81,11 +83,22 @@ export async function buildApp(config: AppConfig) {
     drkUploadTimeoutMs: config.drkUploadTimeoutMs,
   }, app.log);
 
+  // Feature flags endpoint
+  const darkreelEnabled = !!(config.darkreelServer && config.darkreelUser && config.darkreelPass);
+  app.get('/config', { preHandler: authenticate }, async () => ({
+    enableThumbnails: config.enableThumbnails,
+    darkreelEnabled,
+  }));
+
   // Register routes
   await app.register(healthRoutes);
   await app.register(jobRoutes, { store: jobStore, pipeline, preHandler: authenticate });
   await app.register(extractRoutes, { ...routeOpts, preHandler: authenticate });
   await app.register(downloadRoutes, { ...routeOpts, preHandler: authenticate });
+  await app.register(streamDownloadRoutes, { ...routeOpts, preHandler: authenticate });
+  if (config.enableThumbnails) {
+    await app.register(thumbnailRoutes, { ...routeOpts, preHandler: authenticate });
+  }
 
   // Global error handler
   app.setErrorHandler((error, request, reply) => {
