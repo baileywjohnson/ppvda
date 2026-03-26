@@ -1,17 +1,12 @@
-# --- Build drk CLI ---
-FROM golang:1.26-bookworm AS drk-build
-WORKDIR /src
-COPY darkreel-cli/ .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /drk .
-
 # --- Node base ---
 FROM node:20-bookworm-slim AS base
 
-# Install ffmpeg and Chromium system dependencies
+# Install ffmpeg, WireGuard tools, and curl for downloading darkreel-cli
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     wireguard-tools \
     iproute2 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Playwright Chromium
@@ -37,7 +32,20 @@ RUN npm run build
 FROM base AS runtime
 WORKDIR /app
 
-COPY --from=drk-build /drk /usr/local/bin/drk
+# Download darkreel-cli binary from GitHub releases
+# Override DARKREEL_CLI_VERSION at build time to pin a specific version
+ARG DARKREEL_CLI_VERSION=latest
+ARG TARGETARCH
+RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "amd64") && \
+    if [ "$DARKREEL_CLI_VERSION" = "latest" ]; then \
+      URL="https://github.com/baileywjohnson/darkreel-cli/releases/latest/download/darkreel-cli-linux-${ARCH}"; \
+    else \
+      URL="https://github.com/baileywjohnson/darkreel-cli/releases/download/${DARKREEL_CLI_VERSION}/darkreel-cli-linux-${ARCH}"; \
+    fi && \
+    echo "Downloading darkreel-cli from ${URL}" && \
+    curl -fSL -o /usr/local/bin/darkreel-cli "${URL}" && \
+    chmod +x /usr/local/bin/darkreel-cli
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY public/ ./public/
@@ -57,7 +65,7 @@ ENV NODE_ENV=production
 ENV DOWNLOAD_DIR=/app/downloads
 ENV TEMP_DIR=/app/tmp
 ENV MULLVAD_CONFIG_DIR=/app/mullvad
-ENV DRK_BINARY_PATH=/usr/local/bin/drk
+ENV DRK_BINARY_PATH=/usr/local/bin/darkreel-cli
 
 EXPOSE 3000
 CMD ["node", "dist/index.js"]

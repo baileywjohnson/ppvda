@@ -18,6 +18,7 @@ export interface PipelineOpts {
   preferredHosts: string[];
   blockedHosts: string[];
   allowedHosts: string[];
+  maxConcurrentDownloads: number;
   // Darkreel integration
   darkreelServer?: string;
   darkreelUser?: string;
@@ -30,17 +31,49 @@ export interface Pipeline {
   submit(input: { url?: string; videoUrl?: string; filename?: string; timeout?: number }): Promise<string>;
 }
 
+/** Simple semaphore for concurrency limiting */
+class Semaphore {
+  private running = 0;
+  private queue: Array<() => void> = [];
+
+  constructor(private max: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.running < this.max) {
+      this.running++;
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.queue.push(() => { this.running++; resolve(); });
+    });
+  }
+
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+
 export function createPipeline(store: JobStore, opts: PipelineOpts, logger: FastifyBaseLogger): Pipeline {
   const darkreelEnabled = !!(opts.darkreelServer && opts.darkreelUser && opts.darkreelPass);
+  const sem = new Semaphore(opts.maxConcurrentDownloads);
 
   return {
     async submit(input) {
       const job = store.create();
 
-      // Fire and forget — process in background
-      processJob(job.id, input, store, opts, darkreelEnabled, logger).catch((err) => {
-        store.update(job.id, { status: 'failed', error: err instanceof Error ? err.message : 'Unknown error' });
-      });
+      // Fire and forget — process in background with concurrency limit
+      (async () => {
+        await sem.acquire();
+        try {
+          await processJob(job.id, input, store, opts, darkreelEnabled, logger);
+        } catch (err) {
+          store.update(job.id, { status: 'failed', error: err instanceof Error ? err.message : 'Unknown error' });
+        } finally {
+          sem.release();
+        }
+      })();
 
       return job.id;
     },

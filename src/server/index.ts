@@ -73,6 +73,7 @@ export async function buildApp(config: AppConfig) {
   const jobStore = new JobStore(config.maxJobHistory);
   const pipeline = createPipeline(jobStore, {
     ...routeOpts,
+    maxConcurrentDownloads: config.maxConcurrentDownloads,
     darkreelServer: config.darkreelServer,
     darkreelUser: config.darkreelUser,
     darkreelPass: config.darkreelPass,

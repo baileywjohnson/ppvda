@@ -65,7 +65,7 @@ export function loadConfig(): AppConfig {
     darkreelServer: process.env.DARKREEL_SERVER || undefined,
     darkreelUser: process.env.DARKREEL_USER || undefined,
     darkreelPass: process.env.DARKREEL_PASS || undefined,
-    drkBinaryPath: process.env.DRK_BINARY_PATH ?? 'drk',
+    drkBinaryPath: process.env.DRK_BINARY_PATH ?? 'darkreel-cli',
     drkUploadTimeoutMs: parseInt(process.env.DRK_UPLOAD_TIMEOUT_MS ?? '600000', 10),
     // Jobs
     maxJobHistory: parseInt(process.env.MAX_JOB_HISTORY ?? '100', 10),
