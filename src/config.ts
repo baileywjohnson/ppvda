@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import { randomUUID } from 'node:crypto';
 
 dotenv.config();
 
@@ -19,6 +20,18 @@ export interface AppConfig {
   preferredHosts: string[];
   blockedHosts: string[];
   allowedHosts: string[];
+  // Auth
+  ppvdaUsername: string;
+  ppvdaPassword: string;
+  jwtSecret: string;
+  // Darkreel integration (optional)
+  darkreelServer: string | undefined;
+  darkreelUser: string | undefined;
+  darkreelPass: string | undefined;
+  drkBinaryPath: string;
+  drkUploadTimeoutMs: number;
+  // Jobs
+  maxJobHistory: number;
 }
 
 function parseHostList(value: string | undefined): string[] {
@@ -44,5 +57,17 @@ export function loadConfig(): AppConfig {
     preferredHosts: parseHostList(process.env.PREFERRED_HOSTS),
     blockedHosts: parseHostList(process.env.BLOCKED_HOSTS),
     allowedHosts: parseHostList(process.env.ALLOWED_HOSTS),
+    // Auth
+    ppvdaUsername: process.env.PPVDA_USERNAME ?? 'admin',
+    ppvdaPassword: process.env.PPVDA_PASSWORD ?? '',
+    jwtSecret: process.env.JWT_SECRET || randomUUID(),
+    // Darkreel
+    darkreelServer: process.env.DARKREEL_SERVER || undefined,
+    darkreelUser: process.env.DARKREEL_USER || undefined,
+    darkreelPass: process.env.DARKREEL_PASS || undefined,
+    drkBinaryPath: process.env.DRK_BINARY_PATH ?? 'drk',
+    drkUploadTimeoutMs: parseInt(process.env.DRK_UPLOAD_TIMEOUT_MS ?? '600000', 10),
+    // Jobs
+    maxJobHistory: parseInt(process.env.MAX_JOB_HISTORY ?? '100', 10),
   });
 }

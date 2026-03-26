@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { extractVideos } from '../../extractor/index.js';
 import { extractRequestSchema, extractResponseSchema } from '../schemas/extract.js';
 import type { ProxyConfig } from '../../proxy/types.js';
@@ -10,7 +10,7 @@ interface ExtractBody {
 
 export async function extractRoutes(
   app: FastifyInstance,
-  opts: { proxyConfig?: ProxyConfig; defaultTimeoutMs: number; defaultNetworkIdleMs: number; preferredHosts: string[]; blockedHosts: string[]; allowedHosts: string[] },
+  opts: { proxyConfig?: ProxyConfig; defaultTimeoutMs: number; defaultNetworkIdleMs: number; preferredHosts: string[]; blockedHosts: string[]; allowedHosts: string[]; preHandler?: preHandlerHookHandler },
 ) {
   app.post<{ Body: ExtractBody }>(
     '/extract',
@@ -19,6 +19,7 @@ export async function extractRoutes(
         body: extractRequestSchema,
         response: { 200: extractResponseSchema },
       },
+      ...(opts.preHandler ? { preHandler: opts.preHandler } : {}),
     },
     async (request, reply) => {
       const { url, timeout } = request.body;

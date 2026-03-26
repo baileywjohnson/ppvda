@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { extractVideos } from '../../extractor/index.js';
 import { downloadVideo, selectBestVideo } from '../../downloader/index.js';
 import { classifyUrl } from '../../extractor/patterns.js';
@@ -26,6 +26,7 @@ export async function downloadRoutes(
     preferredHosts: string[];
     blockedHosts: string[];
     allowedHosts: string[];
+    preHandler?: preHandlerHookHandler;
   },
 ) {
   app.post<{ Body: DownloadBody }>(
@@ -35,6 +36,7 @@ export async function downloadRoutes(
         body: downloadRequestSchema,
         response: { 200: downloadResponseSchema },
       },
+      ...(opts.preHandler ? { preHandler: opts.preHandler } : {}),
     },
     async (request, reply) => {
       const { url, videoUrl, filename, timeout } = request.body;

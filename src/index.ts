@@ -8,6 +8,19 @@ async function main() {
   const config = loadConfig();
   const logger = createLogger(config.logLevel);
 
+  // Validate auth config
+  if (!config.ppvdaPassword) {
+    throw new Error('PPVDA_PASSWORD must be set');
+  }
+
+  // Validate Darkreel config
+  if (config.darkreelServer) {
+    if (!config.darkreelUser || !config.darkreelPass) {
+      throw new Error('DARKREEL_USER and DARKREEL_PASS are required when DARKREEL_SERVER is set');
+    }
+    logger.info('Darkreel integration enabled');
+  }
+
   // Set up Mullvad WireGuard tunnel if configured
   if (config.mullvadAccount) {
     if (!config.mullvadLocation) {

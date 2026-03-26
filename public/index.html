@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PPVDA</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <div id="login-view">
+    <form id="login-form">
+      <h1>PPVDA</h1>
+      <input type="text" id="username" placeholder="Username" autocomplete="username" required>
+      <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
+      <button type="submit">Log In</button>
+      <p id="login-error" class="error" hidden></p>
+    </form>
+  </div>
+
+  <div id="app-view" hidden>
+    <header>
+      <h1>PPVDA</h1>
+      <button id="logout-btn">Log Out</button>
+    </header>
+
+    <section id="submit-section">
+      <form id="submit-form">
+        <input type="url" id="video-url" placeholder="Paste video page URL..." required>
+        <button type="submit">Download</button>
+      </form>
+    </section>
+
+    <section id="jobs-section">
+      <h2>Jobs</h2>
+      <div id="jobs-list">
+        <p class="empty">No jobs yet</p>
+      </div>
+    </section>
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
