@@ -135,9 +135,8 @@ async function processJob(
       targetType = best.type as VideoType;
       store.update(jobId, { status: 'downloading', videoType: best.type });
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      logger.error({ jobId, err: errMsg }, 'Extraction failed');
-      store.update(jobId, { status: 'failed', error: 'Extraction failed: ' + errMsg });
+      logger.error({ jobId }, 'Extraction failed');
+      store.update(jobId, { status: 'failed', error: 'Extraction failed' });
       return;
     }
   } else {
@@ -166,9 +165,8 @@ async function processJob(
 
     logger.info({ jobId }, 'Download complete');
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    logger.error({ jobId, err: errMsg }, 'Download failed');
-    store.update(jobId, { status: 'failed', error: 'Download failed: ' + errMsg });
+    logger.error({ jobId }, 'Download failed');
+    store.update(jobId, { status: 'failed', error: 'Download failed' });
     return;
   }
 
@@ -206,6 +204,11 @@ async function processJob(
       logger.error({ jobId }, 'Darkreel upload error');
     }
   } else {
+    // No Darkreel configured — delete the local file (don't retain media on PPVDA)
+    const job = store.get(jobId);
+    if (job?.filePath) {
+      await unlink(job.filePath).catch(() => {});
+    }
     store.update(jobId, { status: 'done' });
   }
 }

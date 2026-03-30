@@ -71,7 +71,7 @@ export async function streamDownloadRoutes(
 
       proc.on('close', (code) => {
         if (code !== 0 && code !== null) {
-          request.log.warn({ code, stderr: lastStderrLine }, 'ffmpeg stream exited with error');
+          request.log.warn({ code }, 'ffmpeg stream exited with error');
         }
       });
 

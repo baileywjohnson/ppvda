@@ -1,42 +1,107 @@
 # PPVDA -- Pretty Private Video Download Assistant
 
-A privacy-focused service that extracts video URLs from web pages and downloads them. All traffic can be routed through a proxy or Mullvad VPN. No logs are kept about what is extracted or downloaded.
-
-Optionally integrates with [Darkreel](https://github.com/baileywjohnson/darkreel) to automatically encrypt and upload downloaded videos to your encrypted media library.
+A privacy-focused video extraction and download service with a web UI. Extracts video sources from web pages via headless Chromium, downloads them through a proxy or Mullvad VPN, and optionally encrypts and uploads them to a [Darkreel](https://github.com/baileywjohnson/darkreel) server.
 
 ## Features
 
-- **Web UI** -- Paste a URL, track job progress in real time
-- **Video extraction** -- Loads pages in headless Chromium, discovers video sources via network interception and DOM scanning
-- **Video download** -- Supports HLS (.m3u8), DASH (.mpd), and direct file downloads, remuxing streams to MP4 via ffmpeg
-- **Darkreel integration** -- Automatically encrypt and upload downloads to a Darkreel server via [darkreel-cli](https://github.com/baileywjohnson/darkreel-cli)
+- **Web UI** -- Paste a URL, see extracted videos with metadata, download or upload to Darkreel
+- **Progressive extraction** -- Video sources stream to the UI as they're discovered (first results in ~2-3 seconds)
+- **Video metadata** -- Duration, resolution, file size probed via ffprobe and displayed as tags
+- **Ad filtering** -- Built-in blocklist of ~30 common ad-tech domains
+- **Hash modification** -- Downloaded files are remuxed through ffmpeg, producing a different hash from the source
+- **Streaming download** -- Videos pipe through ffmpeg directly to your browser with no temp file on the server
+- **Multi-user** -- Per-user accounts with admin-managed user creation
+- **Encrypted Darkreel credentials** -- Each user's Darkreel server/username/password are encrypted at rest with a hybrid encryption model
+- **Configurable thumbnails** -- Optional server-side thumbnail generation via ffmpeg (preserves VPN/proxy routing)
 - **Proxy support** -- Route all traffic through SOCKS4/5 or HTTP/HTTPS proxies
 - **Mullvad VPN** -- Auto-configures a WireGuard tunnel inside Docker containers
-- **Host filtering** -- Prefer, block, or whitelist video sources by domain
-- **Concurrency control** -- Configurable parallel download limit (default: 3)
-- **Privacy by design** -- No request logging, no URL logging, no download history
+- **Concurrency control** -- Configurable parallel download limit
+- **Privacy by design** -- No request logging, no URL retention, no download history, downloaded files auto-deleted
 
 ## Architecture
 
 ```
-Browser  -->  PPVDA (your download server)  -->  Darkreel (your streaming server)
-                |                                      |
-   paste URL    |  extract + download + encrypt        |  encrypted storage
-   view jobs    |  via proxy/VPN                       |  streaming to client
+Browser  -->  PPVDA (download server)  -->  Darkreel (streaming server)
+                |                                |
+   paste URL    |  extract + download + encrypt  |  encrypted storage
+   view results |  via proxy/VPN                 |  streaming to client
 ```
 
-PPVDA is designed to run on a server in a privacy-friendly location (routed through VPN/proxy). Darkreel runs wherever you want low-latency streaming (e.g., a US VPS). The two servers communicate through the `darkreel-cli` tool, which encrypts files locally before uploading.
+PPVDA runs on a server in a privacy-friendly location (behind VPN/proxy). Darkreel runs wherever you want low-latency streaming (e.g., a US VPS). The two communicate through the [darkreel-cli](https://github.com/baileywjohnson/darkreel-cli) tool, which encrypts files locally before uploading.
 
-## Security: TLS Required
+## Minimum requirements
+
+### PPVDA server
+
+| Component | Minimum | Recommended |
+|-----------|---------|-------------|
+| CPU | 2 vCPU | 4+ vCPU |
+| RAM | 2 GB | 4+ GB |
+| Disk | 20 GB | 50+ GB |
+| OS | Linux (amd64 or arm64) | Ubuntu 22.04+ / Debian 12+ |
+
+PPVDA is more resource-intensive than Darkreel because it runs headless Chromium for video extraction and ffmpeg for downloads/probing. The 2 GB RAM minimum is driven by Chromium.
+
+### Darkreel server
+
+| Component | Minimum | Recommended |
+|-----------|---------|-------------|
+| CPU | 1 vCPU | 2+ vCPU |
+| RAM | 512 MB | 1+ GB |
+| Disk | 10 GB | Depends on library size |
+
+## Security
+
+### TLS required
 
 PPVDA does not handle TLS itself. **You must deploy it behind a TLS-terminating reverse proxy** (nginx, Caddy, etc.) or access it only over a secure tunnel (WireGuard, SSH). Without TLS, login credentials and session cookies are transmitted in plaintext.
+
+### Credential encryption (hybrid model)
+
+Each user's Darkreel credentials are encrypted at rest using a hybrid encryption model:
+
+```
+User Password --> PBKDF2 --> user_key
+                               |
+                   Decrypts: encrypted_master_key (per-user, stored in DB)
+                               |
+                           master_key (lives in RAM only, never on disk)
+                               |
+                   Decrypts: darkreel_creds (per-user, stored in DB)
+```
+
+- A single `master_key` is generated once at first startup and never stored in plaintext
+- Each user stores a copy of `master_key` encrypted with their own password-derived key
+- Darkreel credentials are encrypted with `master_key` using AES-256-GCM
+- On login, the password unlocks the master key and holds it in RAM
+- On server restart, all sessions are cleared -- users must re-login
+
+**Threat model:**
+- Database file stolen --> encrypted master keys + encrypted creds --> useless without a user password
+- Environment variables stolen --> no master key there --> useless
+- Full server compromise --> attacker could modify code, but cannot retroactively decrypt stored creds
+
+### What the server retains
+
+| Data | Retained? | Where |
+|------|-----------|-------|
+| Video URLs | No | Only in browser memory during extraction |
+| Downloaded files | No | Auto-deleted after job completion |
+| Download history | No | Job metadata cleared from memory on completion |
+| Darkreel credentials | Encrypted at rest | SQLite DB |
+| Usernames | Yes (plaintext) | SQLite DB -- use non-identifying usernames |
+| Passwords | Hashed (scrypt) | SQLite DB |
+
+### Password hashing
+
+Passwords are hashed with scrypt (N=16384, r=8, p=1, 64-byte output) with a random 32-byte salt per user. The PBKDF2 key derivation for credential encryption uses SHA-256 with 100,000 iterations.
 
 ## Quick start
 
 ### Prerequisites
 
 - Node.js 20+
-- ffmpeg
+- ffmpeg (for downloads, remuxing, and thumbnail generation)
 - Chromium (installed via Playwright)
 
 ### Setup
@@ -49,10 +114,11 @@ npx playwright install chromium
 cp .env.example .env
 ```
 
-Edit `.env` and set at minimum:
+Edit `.env` and set your admin password:
 
 ```
-PPVDA_PASSWORD=your-secure-password
+PPVDA_ADMIN_USERNAME=admin
+PPVDA_ADMIN_PASSWORD=your-secure-password
 ```
 
 ### Run
@@ -61,75 +127,119 @@ PPVDA_PASSWORD=your-secure-password
 npm run dev
 ```
 
-Open `http://localhost:3000`, log in with `admin` / your password, and paste a video URL.
+Open `http://localhost:3000`, log in with your admin credentials. On first startup, the admin account is created in the database. After that, the env var password is ignored -- use the password you set (or change it in Settings).
+
+## User management
+
+### Admin bootstrap
+
+On first startup, if the database is empty, PPVDA creates an admin user from the `PPVDA_ADMIN_USERNAME` and `PPVDA_ADMIN_PASSWORD` environment variables. After this, the env vars are not used for authentication -- the database is authoritative.
+
+### Creating users
+
+Only admins can create new users. In the web UI, click **Admin** in the header to access user management. Or use the API:
+
+```bash
+curl -X POST http://localhost:3000/admin/users \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "alice", "password": "securepass123"}'
+```
+
+### Changing password
+
+Any logged-in user can change their own password via **Settings** in the web UI, or:
+
+```bash
+curl -X POST http://localhost:3000/auth/change-password \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"oldPassword": "current", "newPassword": "newsecurepass"}'
+```
 
 ## Darkreel integration
 
-To automatically encrypt and upload downloaded videos to a Darkreel server:
+Each user configures their own Darkreel credentials independently via **Settings** in the web UI. Credentials are encrypted at rest (see [Credential encryption](#credential-encryption-hybrid-model)).
 
-1. Install [darkreel-cli](https://github.com/baileywjohnson/darkreel-cli#install) and make sure it's in your PATH (or set `DRK_BINARY_PATH`)
+1. Set up a [Darkreel](https://github.com/baileywjohnson/darkreel) server and create an account
+2. Install [darkreel-cli](https://github.com/baileywjohnson/darkreel-cli#install) on the PPVDA server (make sure it's in PATH or set `DRK_BINARY_PATH`)
+3. In the PPVDA web UI, go to **Settings** and enter your Darkreel server URL, username, and password
+4. The "Upload to Darkreel" button will now appear on extracted videos
 
-2. Add to your `.env`:
+When you click "Upload to Darkreel", the pipeline runs: **download --> encrypt (via darkreel-cli) --> upload to Darkreel --> delete local file**. Credentials are passed to darkreel-cli via environment variables (not CLI args) to prevent exposure in `ps aux`.
 
-```
-DARKREEL_SERVER=https://media.example.com
-DARKREEL_USER=your-darkreel-username
-DARKREEL_PASS=your-darkreel-password
-```
+## Web UI workflow
 
-3. Restart PPVDA. Downloads will now follow this pipeline:
-
-   **extracting** --> **downloading** --> **encrypting** --> **done**
-
-   The "encrypting" step runs `darkreel-cli upload`, which encrypts the file client-side and uploads it to your Darkreel server. The local file is deleted after a successful upload.
-
-## Web UI
-
-The web interface provides:
-
-- **Login page** -- Simple username/password authentication
-- **URL input** -- Paste a video page URL and submit
-- **Job list** -- Real-time status updates via Server-Sent Events (SSE)
-- **Status badges** -- Color-coded: extracting (blue), downloading (yellow), encrypting (purple), done (green), failed (red)
+1. **Login** -- Username/password, JWT stored in httpOnly cookie
+2. **Paste URL** -- Click "Extract" to discover video sources
+3. **Progressive results** -- Video cards appear as they're found (~2-3s for first results)
+4. **Metadata tags** -- Type (HLS/DASH/DIRECT), quality, duration, file size load progressively via ffprobe
+5. **Ad filtering** -- Tiny files (<5KB) and very short videos (<=2s) are moved to a collapsed "Possible ads" section
+6. **Download** -- Streams video through ffmpeg remux directly to your browser (no server-side storage, hash modified)
+7. **Upload to Darkreel** -- Submits a background job that downloads, encrypts, and uploads to your Darkreel server
 
 ## API
 
-All API endpoints (except `/health` and `/auth/login`) require authentication via Bearer token or session cookie.
+All endpoints except `/health` and `/auth/login` require authentication via Bearer token or session cookie.
 
 ### Auth
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/auth/login` | Login with username/password, returns JWT |
-| POST | `/auth/logout` | Logout (clears session cookie) |
+| POST | `/auth/login` | Login, returns JWT + sets cookie |
+| POST | `/auth/logout` | Logout, clears session + cookie |
+| POST | `/auth/change-password` | Change password (requires `oldPassword` + `newPassword`) |
+
+### Extraction
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/extract` | Extract video sources (synchronous, returns full list) |
+| POST | `/extract/stream` | Extract with progressive SSE streaming |
+
+### Download
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/stream-download` | Stream video through ffmpeg remux to browser (hash modified) |
+| POST | `/download` | Download video to server disk (legacy) |
 
 ### Jobs
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/jobs` | Submit a new download job |
-| GET | `/jobs` | List all jobs |
+| POST | `/jobs` | Submit upload-to-Darkreel job |
+| GET | `/jobs` | List your jobs |
 | GET | `/jobs/:id` | Get job status |
-| GET | `/jobs/events` | SSE stream for real-time job updates |
 
-**POST /jobs body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `url` | string | one of `url` or `videoUrl` | Page URL to extract from |
-| `videoUrl` | string | one of `url` or `videoUrl` | Direct video URL (skips extraction) |
-| `filename` | string | no | Output filename (max 200 chars) |
-| `timeout` | number | no | Browser timeout in ms |
-
-### Legacy endpoints
-
-These endpoints from the original API still work (now require auth):
+### Thumbnails
 
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/thumbnail?videoUrl=<url>` | Generate thumbnail via ffprobe (only if `ENABLE_THUMBNAILS=true`) |
+
+### Settings
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/settings/darkreel` | Check if Darkreel credentials are configured |
+| PUT | `/settings/darkreel` | Save Darkreel credentials (encrypted at rest) |
+| DELETE | `/settings/darkreel` | Remove Darkreel credentials |
+
+### Admin (admin-only)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/admin/users` | List all users |
+| POST | `/admin/users` | Create a new user |
+| DELETE | `/admin/users/:id` | Delete a user (immediately invalidates their session) |
+
+### Config
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/config` | Get feature flags (thumbnails enabled, Darkreel configured, admin status) |
 | GET | `/health` | Health check (no auth required) |
-| POST | `/extract` | Extract video sources from a page (synchronous) |
-| POST | `/download` | Download a video (synchronous) |
 
 ## Configuration
 
@@ -141,50 +251,48 @@ All configuration is via environment variables (or `.env` file).
 |----------|---------|-------------|
 | `PORT` | `3000` | Server port |
 | `HOST` | `0.0.0.0` | Server bind address |
-| `DOWNLOAD_DIR` | `./downloads` | Where downloaded files are saved |
-| `FFMPEG_PATH` | `ffmpeg` | Path to ffmpeg binary |
-| `MAX_CONCURRENT_DOWNLOADS` | `3` | Max parallel download jobs |
+| `DOWNLOAD_DIR` | `./downloads` | Temp directory for downloads (files auto-deleted after jobs) |
+| `FFMPEG_PATH` | `ffmpeg` | Path to ffmpeg binary (ffprobe derived from this) |
+| `MAX_CONCURRENT_DOWNLOADS` | `3` | Max parallel download/upload jobs |
 | `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
 
 ### Authentication
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PPVDA_USERNAME` | `admin` | Login username |
-| `PPVDA_PASSWORD` | **(required)** | Login password |
-| `JWT_SECRET` | random UUID | Secret for signing JWT tokens |
+| `PPVDA_ADMIN_USERNAME` | `admin` | Admin username (first-run bootstrap only) |
+| `PPVDA_ADMIN_PASSWORD` | **(required on first run)** | Admin password (first-run bootstrap only) |
+| `JWT_SECRET` | random UUID | JWT signing secret (random per restart if not set -- set this for persistent sessions) |
+| `DB_PATH` | `./data/ppvda.db` | SQLite database path |
 
-### Darkreel integration
+### Darkreel CLI
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DARKREEL_SERVER` | | Darkreel server URL (e.g., `https://media.example.com`) |
-| `DARKREEL_USER` | | Darkreel username |
-| `DARKREEL_PASS` | | Darkreel password |
 | `DRK_BINARY_PATH` | `darkreel-cli` | Path to the darkreel-cli binary |
 | `DRK_UPLOAD_TIMEOUT_MS` | `600000` | Max time for darkreel-cli upload (10 min) |
 
-### Timeouts
+### Extraction & Download
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BROWSER_TIMEOUT_MS` | `30000` | Max time to wait for page load |
-| `NETWORK_IDLE_MS` | `5000` | Wait for network idle before finishing extraction |
-| `DOWNLOAD_TIMEOUT_MS` | `300000` | Max time for a download (5 min) |
+| `NETWORK_IDLE_MS` | `2000` | Wait for network idle before finishing extraction |
+| `DOWNLOAD_TIMEOUT_MS` | `300000` | Max time for a video download (5 min) |
 
 ### Proxy
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROXY_URL` | | Proxy URL (e.g., `socks5://host:port`) |
+| `PROXY_URL` | | Proxy URL (e.g., `socks5://user:pass@host:port`) |
 
 ### Host filtering
 
-Comma-separated domain lists. Subdomain matching is supported (blocking `example.com` also blocks `cdn.example.com`).
+Comma-separated domain lists. Subdomain matching is supported.
 
 | Variable | Description |
 |----------|-------------|
-| `PREFERRED_HOSTS` | Videos from these domains are sorted first in results |
+| `PREFERRED_HOSTS` | Videos from these domains are sorted first |
 | `BLOCKED_HOSTS` | Videos from these domains are excluded |
 | `ALLOWED_HOSTS` | When set, **only** videos from these domains are returned |
 
@@ -198,11 +306,12 @@ For use in Docker. Sets up a WireGuard tunnel so all container traffic routes th
 | `MULLVAD_LOCATION` | Relay location -- country code (`se`) or country-city (`se-mma`, `us-nyc`) |
 | `MULLVAD_CONFIG_DIR` | WireGuard config directory (default: `./mullvad`) |
 
-### Jobs
+### Features
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_JOB_HISTORY` | `100` | Max completed jobs to keep in memory |
+| `ENABLE_THUMBNAILS` | `false` | Enable video thumbnail previews in extraction results |
+| `MAX_JOB_HISTORY` | `100` | Max completed jobs kept in memory |
 
 ## Docker
 
@@ -218,16 +327,14 @@ docker build --build-arg DARKREEL_CLI_VERSION=v1.0.0 -t ppvda .
 
 ### docker-compose.yml
 
-The provided `docker-compose.yml` includes WireGuard support. Set your environment variables in `.env`:
+Set your environment variables in `.env`:
 
 ```bash
 # Required
-PPVDA_PASSWORD=your-secure-password
+PPVDA_ADMIN_PASSWORD=your-secure-password
 
-# Optional: Darkreel integration
-DARKREEL_SERVER=https://media.example.com
-DARKREEL_USER=your-darkreel-username
-DARKREEL_PASS=your-darkreel-password
+# Recommended: set a persistent JWT secret
+JWT_SECRET=your-random-256-bit-hex-string
 
 # Optional: Mullvad VPN
 MULLVAD_ACCOUNT=your-account-number
@@ -238,9 +345,7 @@ The container requires `NET_ADMIN` capability and `/dev/net/tun` for WireGuard (
 
 ## Full deployment example
 
-A typical setup with Darkreel on a US VPS and PPVDA on a privacy-friendly server:
-
-### 1. US VPS: Darkreel
+### 1. Darkreel on a US VPS (streaming)
 
 ```bash
 # On your US VPS
@@ -253,10 +358,10 @@ go build -o darkreel .
 
 Register an account via the web UI at `https://media.example.com`.
 
-### 2. Download server: PPVDA
+### 2. PPVDA on a download server (with VPN)
 
 ```bash
-# On your download server (non-US, or with VPN)
+# On your download server
 git clone https://github.com/baileywjohnson/ppvda.git
 cd ppvda
 
@@ -268,31 +373,38 @@ chmod +x /usr/local/bin/darkreel-cli
 # Configure
 cp .env.example .env
 # Edit .env:
-#   PPVDA_PASSWORD=your-ppvda-password
-#   DARKREEL_SERVER=https://media.example.com
-#   DARKREEL_USER=your-darkreel-username
-#   DARKREEL_PASS=your-darkreel-password
+#   PPVDA_ADMIN_PASSWORD=your-ppvda-password
+#   JWT_SECRET=<generate with: openssl rand -hex 32>
 
 # Run with Docker (includes Mullvad VPN)
 docker compose up --build
 ```
 
-### 3. Use it
+### 3. Configure Darkreel integration
 
-1. Open `http://your-download-server:3000`
-2. Log in with your PPVDA credentials
-3. Paste a video URL
-4. Watch the job progress: extracting --> downloading --> encrypting --> done
-5. Open `https://media.example.com` to stream your encrypted video
+1. Open `http://your-download-server:3000` and login
+2. Go to **Settings**
+3. Enter your Darkreel server URL, username, and password
+4. Save -- credentials are encrypted and stored in the local database
+
+### 4. Use it
+
+1. Paste a video page URL and click "Extract"
+2. Video cards appear progressively with metadata tags
+3. Click "Download" to save to your browser, or "Upload to Darkreel" to encrypt and store
+4. Stream your encrypted video at `https://media.example.com`
 
 ## Privacy
 
 - Request logging is disabled -- no URLs appear in server logs
-- Job objects never store URLs
-- Error messages are sanitized to exclude URLs and network details
-- VPN/proxy connection details are not logged
-- No download history or metadata is persisted
-- Downloaded files are deleted after successful upload to Darkreel
+- Extraction results live only in browser memory, never persisted
+- Downloaded files are auto-deleted after job completion
+- Job metadata (file size, duration, format) is cleared from memory when jobs finish
+- Error messages are sanitized to exclude URLs and paths
+- Darkreel credentials are encrypted at rest with per-user keys
+- The `darkreel-cli` subprocess receives credentials via environment variables, not CLI arguments
+- CORS is disabled (same-origin only)
+- JWTs contain only user ID and role -- no username
 
 ## Related projects
 

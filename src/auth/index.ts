@@ -24,8 +24,8 @@ export interface UserContext {
 
 declare module '@fastify/jwt' {
   interface FastifyJWT {
-    payload: { sub: string; username: string; isAdmin: boolean };
-    user: { sub: string; username: string; isAdmin: boolean };
+    payload: { sub: string; isAdmin: boolean };
+    user: { sub: string; isAdmin: boolean };
   }
 }
 
@@ -47,7 +47,7 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
       const queryToken = (request.query as Record<string, string>)?.token;
       if (queryToken) {
         try {
-          const payload = app.jwt.verify<{ sub: string; username: string; isAdmin: boolean }>(queryToken);
+          const payload = app.jwt.verify<{ sub: string; isAdmin: boolean }>(queryToken);
           (request as any).user = payload;
         } catch {
           reply.status(401).send({ success: false, error: 'Unauthorized' });
@@ -119,7 +119,7 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
       zeroBuffer(masterKey);
 
       const token = app.jwt.sign(
-        { sub: user.id, username: user.username, isAdmin: !!user.is_admin },
+        { sub: user.id, isAdmin: !!user.is_admin },
         { expiresIn: '24h' },
       );
 

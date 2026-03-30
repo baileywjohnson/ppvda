@@ -93,7 +93,8 @@ export async function downloadRoutes(
         ffmpegPath: opts.ffmpegPath,
       });
 
-      return { success: true, data: result };
+      const { filePath: _, ...safeResult } = result;
+      return { success: true, data: safeResult };
     },
   );
 }

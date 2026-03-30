@@ -42,6 +42,14 @@ export class JobStore {
     const job = this.jobs.get(id);
     if (!job) return undefined;
     Object.assign(job, patch, { updatedAt: new Date().toISOString() });
+    // Clear sensitive metadata from terminal jobs to minimize retained info
+    if (job.status === 'done' || job.status === 'failed') {
+      job.filePath = undefined;
+      job.fileSize = undefined;
+      job.durationSec = undefined;
+      job.format = undefined;
+      job.videoType = undefined;
+    }
     this.emit(job);
     return job;
   }
