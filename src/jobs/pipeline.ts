@@ -1,11 +1,14 @@
 import { unlink } from 'node:fs/promises';
 import type { FastifyBaseLogger } from 'fastify';
 import type { JobStore } from './store.js';
+import type { DB } from '../db/index.js';
+import type { SessionStore } from '../auth/sessions.js';
 import type { ProxyConfig } from '../proxy/types.js';
 import { extractVideos } from '../extractor/index.js';
 import { downloadVideo, selectBestVideo } from '../downloader/index.js';
 import { classifyUrl } from '../extractor/patterns.js';
 import { uploadToDarkreel } from '../hooks/darkreel.js';
+import { getUserDarkreelCreds } from '../server/routes/settings.js';
 import type { VideoType } from '../extractor/types.js';
 
 export interface PipelineOpts {
@@ -19,16 +22,12 @@ export interface PipelineOpts {
   blockedHosts: string[];
   allowedHosts: string[];
   maxConcurrentDownloads: number;
-  // Darkreel integration
-  darkreelServer?: string;
-  darkreelUser?: string;
-  darkreelPass?: string;
   drkBinaryPath: string;
   drkUploadTimeoutMs: number;
 }
 
 export interface Pipeline {
-  submit(input: { url?: string; videoUrl?: string; filename?: string; timeout?: number }): Promise<string>;
+  submit(userId: string, input: { url?: string; videoUrl?: string; filename?: string; timeout?: number }): Promise<string>;
 }
 
 /** Simple semaphore for concurrency limiting */
@@ -55,19 +54,23 @@ class Semaphore {
   }
 }
 
-export function createPipeline(store: JobStore, opts: PipelineOpts, logger: FastifyBaseLogger): Pipeline {
-  const darkreelEnabled = !!(opts.darkreelServer && opts.darkreelUser && opts.darkreelPass);
+export function createPipeline(
+  store: JobStore,
+  opts: PipelineOpts,
+  db: DB,
+  sessions: SessionStore,
+  logger: FastifyBaseLogger,
+): Pipeline {
   const sem = new Semaphore(opts.maxConcurrentDownloads);
 
   return {
-    async submit(input) {
-      const job = store.create();
+    async submit(userId, input) {
+      const job = store.create(userId);
 
-      // Fire and forget — process in background with concurrency limit
       (async () => {
         await sem.acquire();
         try {
-          await processJob(job.id, input, store, opts, darkreelEnabled, logger);
+          await processJob(job.id, userId, input, store, opts, db, sessions, logger);
         } catch (err) {
           store.update(job.id, { status: 'failed', error: err instanceof Error ? err.message : 'Unknown error' });
         } finally {
@@ -82,10 +85,12 @@ export function createPipeline(store: JobStore, opts: PipelineOpts, logger: Fast
 
 async function processJob(
   jobId: string,
+  userId: string,
   input: { url?: string; videoUrl?: string; filename?: string; timeout?: number },
   store: JobStore,
   opts: PipelineOpts,
-  darkreelEnabled: boolean,
+  db: DB,
+  sessions: SessionStore,
   logger: FastifyBaseLogger,
 ) {
   let targetUrl: string;
@@ -100,7 +105,6 @@ async function processJob(
     }
     targetUrl = input.videoUrl;
     targetType = match.type;
-    // Skip extracting state — go straight to downloading
     store.update(jobId, { status: 'downloading', videoType: match.type });
   } else if (input.url) {
     store.update(jobId, { status: 'extracting' });
@@ -168,8 +172,9 @@ async function processJob(
     return;
   }
 
-  // Step 3: Upload to Darkreel (if configured)
-  if (darkreelEnabled) {
+  // Step 3: Upload to Darkreel (if user has creds configured)
+  const creds = getUserDarkreelCreds(db, sessions, userId);
+  if (creds) {
     store.update(jobId, { status: 'encrypting' });
 
     const job = store.get(jobId);
@@ -181,15 +186,14 @@ async function processJob(
     try {
       const result = await uploadToDarkreel({
         drkBinaryPath: opts.drkBinaryPath,
-        serverUrl: opts.darkreelServer!,
-        username: opts.darkreelUser!,
-        password: opts.darkreelPass!,
+        serverUrl: creds.server,
+        username: creds.username,
+        password: creds.password,
         filePath: job.filePath,
         timeoutMs: opts.drkUploadTimeoutMs,
       });
 
       if (result.success) {
-        // Delete local file after successful upload
         await unlink(job.filePath).catch(() => {});
         store.update(jobId, { status: 'done' });
         logger.info({ jobId }, 'Uploaded to Darkreel');

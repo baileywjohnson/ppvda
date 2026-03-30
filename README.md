@@ -27,6 +27,10 @@ Browser  -->  PPVDA (your download server)  -->  Darkreel (your streaming server
 
 PPVDA is designed to run on a server in a privacy-friendly location (routed through VPN/proxy). Darkreel runs wherever you want low-latency streaming (e.g., a US VPS). The two servers communicate through the `darkreel-cli` tool, which encrypts files locally before uploading.
 
+## Security: TLS Required
+
+PPVDA does not handle TLS itself. **You must deploy it behind a TLS-terminating reverse proxy** (nginx, Caddy, etc.) or access it only over a secure tunnel (WireGuard, SSH). Without TLS, login credentials and session cookies are transmitted in plaintext.
+
 ## Quick start
 
 ### Prerequisites

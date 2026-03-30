@@ -4,6 +4,8 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import type { AppConfig } from '../config.js';
+import type { DB } from '../db/index.js';
+import type { SessionStore } from '../auth/sessions.js';
 import { parseProxyUrl, type ProxyConfig } from '../proxy/index.js';
 import { AppError } from '../utils/errors.js';
 import { setupAuth } from '../auth/index.js';
@@ -15,10 +17,12 @@ import { downloadRoutes } from './routes/download.js';
 import { jobRoutes } from './routes/jobs.js';
 import { streamDownloadRoutes } from './routes/stream-download.js';
 import { thumbnailRoutes } from './routes/thumbnail.js';
+import { adminRoutes } from './routes/admin.js';
+import { settingsRoutes } from './routes/settings.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-export async function buildApp(config: AppConfig) {
+export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore) {
   const app = Fastify({
     logger: {
       level: config.logLevel,
@@ -26,12 +30,12 @@ export async function buildApp(config: AppConfig) {
     disableRequestLogging: true,
   });
 
-  await app.register(cors);
+  await app.register(cors, { origin: false });
 
-  // Auth (JWT + cookie + login/logout routes)
-  const authenticate = await setupAuth(app, {
-    username: config.ppvdaUsername,
-    password: config.ppvdaPassword,
+  // Auth (JWT + cookie + login/logout/change-password routes)
+  const { authenticate, requireAdmin } = await setupAuth(app, {
+    db,
+    sessions,
     jwtSecret: config.jwtSecret,
   });
 
@@ -45,7 +49,10 @@ export async function buildApp(config: AppConfig) {
 
   // SPA fallback — serve index.html for non-API, non-file routes
   app.setNotFoundHandler((request, reply) => {
-    if (request.url.startsWith('/api/') || request.url.startsWith('/auth/') || request.url.startsWith('/jobs') || request.url.startsWith('/stream-download') || request.url.startsWith('/thumbnail') || request.url.startsWith('/config')) {
+    if (request.url.startsWith('/api/') || request.url.startsWith('/auth/') || request.url.startsWith('/jobs')
+      || request.url.startsWith('/stream-download') || request.url.startsWith('/thumbnail')
+      || request.url.startsWith('/config') || request.url.startsWith('/admin') || request.url.startsWith('/settings')
+      || request.url.startsWith('/extract')) {
       reply.status(404).send({ success: false, error: 'Not found' });
     } else {
       reply.sendFile('index.html');
@@ -76,22 +83,25 @@ export async function buildApp(config: AppConfig) {
   const pipeline = createPipeline(jobStore, {
     ...routeOpts,
     maxConcurrentDownloads: config.maxConcurrentDownloads,
-    darkreelServer: config.darkreelServer,
-    darkreelUser: config.darkreelUser,
-    darkreelPass: config.darkreelPass,
     drkBinaryPath: config.drkBinaryPath,
     drkUploadTimeoutMs: config.drkUploadTimeoutMs,
-  }, app.log);
+  }, db, sessions, app.log);
 
   // Feature flags endpoint
-  const darkreelEnabled = !!(config.darkreelServer && config.darkreelUser && config.darkreelPass);
-  app.get('/config', { preHandler: authenticate }, async () => ({
-    enableThumbnails: config.enableThumbnails,
-    darkreelEnabled,
-  }));
+  app.get('/config', { preHandler: authenticate }, async (request) => {
+    const userId = (request as any).user.sub;
+    const isAdmin = (request as any).user.isAdmin;
+    return {
+      enableThumbnails: config.enableThumbnails,
+      darkreelConfigured: db.hasDarkreelCreds(userId),
+      isAdmin,
+    };
+  });
 
   // Register routes
   await app.register(healthRoutes);
+  await app.register(adminRoutes, { db, sessions, preHandler: authenticate, requireAdmin });
+  await app.register(settingsRoutes, { db, sessions, preHandler: authenticate });
   await app.register(jobRoutes, { store: jobStore, pipeline, preHandler: authenticate });
   await app.register(extractRoutes, { ...routeOpts, preHandler: authenticate });
   await app.register(downloadRoutes, { ...routeOpts, preHandler: authenticate });
@@ -112,7 +122,6 @@ export async function buildApp(config: AppConfig) {
       return;
     }
 
-    // Fastify validation errors
     const fastifyError = error as { validation?: unknown; message?: string };
     if (fastifyError.validation) {
       reply.status(400).send({

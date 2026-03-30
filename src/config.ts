@@ -20,14 +20,12 @@ export interface AppConfig {
   preferredHosts: string[];
   blockedHosts: string[];
   allowedHosts: string[];
-  // Auth
-  ppvdaUsername: string;
-  ppvdaPassword: string;
+  // Auth + DB
   jwtSecret: string;
-  // Darkreel integration (optional)
-  darkreelServer: string | undefined;
-  darkreelUser: string | undefined;
-  darkreelPass: string | undefined;
+  dbPath: string;
+  adminUsername: string;
+  adminPassword: string;
+  // Darkreel (server-wide settings, creds are per-user in DB)
   drkBinaryPath: string;
   drkUploadTimeoutMs: number;
   // Jobs
@@ -59,14 +57,12 @@ export function loadConfig(): AppConfig {
     preferredHosts: parseHostList(process.env.PREFERRED_HOSTS),
     blockedHosts: parseHostList(process.env.BLOCKED_HOSTS),
     allowedHosts: parseHostList(process.env.ALLOWED_HOSTS),
-    // Auth
-    ppvdaUsername: process.env.PPVDA_USERNAME ?? 'admin',
-    ppvdaPassword: process.env.PPVDA_PASSWORD ?? '',
+    // Auth + DB
     jwtSecret: process.env.JWT_SECRET || randomUUID(),
+    dbPath: process.env.DB_PATH ?? './data/ppvda.db',
+    adminUsername: process.env.PPVDA_ADMIN_USERNAME ?? 'admin',
+    adminPassword: process.env.PPVDA_ADMIN_PASSWORD ?? '',
     // Darkreel
-    darkreelServer: process.env.DARKREEL_SERVER || undefined,
-    darkreelUser: process.env.DARKREEL_USER || undefined,
-    darkreelPass: process.env.DARKREEL_PASS || undefined,
     drkBinaryPath: process.env.DRK_BINARY_PATH ?? 'darkreel-cli',
     drkUploadTimeoutMs: parseInt(process.env.DRK_UPLOAD_TIMEOUT_MS ?? '600000', 10),
     // Jobs

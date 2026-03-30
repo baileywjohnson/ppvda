@@ -10,10 +10,11 @@ export class JobStore {
     this.maxHistory = maxHistory;
   }
 
-  create(): Job {
+  create(userId: string): Job {
     const now = new Date().toISOString();
     const job: Job = {
       id: generateId(),
+      userId,
       status: 'extracting',
       createdAt: now,
       updatedAt: now,
@@ -28,10 +29,12 @@ export class JobStore {
     return this.jobs.get(id);
   }
 
-  list(): JobResponse[] {
-    const jobs = [...this.jobs.values()].sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-    );
+  list(userId?: string): JobResponse[] {
+    let jobs = [...this.jobs.values()];
+    if (userId) {
+      jobs = jobs.filter((j) => j.userId === userId);
+    }
+    jobs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     return jobs.map(stripInternal);
   }
 
@@ -81,6 +84,6 @@ export class JobStore {
 }
 
 function stripInternal(job: Job): JobResponse {
-  const { filePath: _, ...rest } = job;
+  const { filePath: _, userId: _u, ...rest } = job;
   return rest;
 }

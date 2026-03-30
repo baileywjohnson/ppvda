@@ -3,23 +3,31 @@ import { buildApp } from './server/index.js';
 import { closeBrowser } from './extractor/index.js';
 import { setupMullvad, teardownMullvad } from './mullvad/index.js';
 import { createLogger } from './utils/logger.js';
+import { DB } from './db/index.js';
+import { SessionStore } from './auth/sessions.js';
+import { bootstrapAdmin } from './auth/index.js';
 
 async function main() {
   const config = loadConfig();
   const logger = createLogger(config.logLevel);
 
-  // Validate auth config
-  if (!config.ppvdaPassword) {
-    throw new Error('PPVDA_PASSWORD must be set');
+  // Initialize database
+  const db = new DB(config.dbPath);
+  logger.info({ dbPath: config.dbPath }, 'Database initialized');
+
+  // Bootstrap admin user on first run
+  if (db.getUserCount() === 0) {
+    if (!config.adminPassword) {
+      throw new Error('PPVDA_ADMIN_PASSWORD must be set for first-run admin bootstrap');
+    }
+    const masterKey = bootstrapAdmin(db, config.adminUsername, config.adminPassword);
+    // Zero the master key — it will be decrypted on login
+    masterKey.fill(0);
+    logger.info({ username: config.adminUsername }, 'Admin user created');
   }
 
-  // Validate Darkreel config
-  if (config.darkreelServer) {
-    if (!config.darkreelUser || !config.darkreelPass) {
-      throw new Error('DARKREEL_USER and DARKREEL_PASS are required when DARKREEL_SERVER is set');
-    }
-    logger.info('Darkreel integration enabled');
-  }
+  // Initialize session store
+  const sessions = new SessionStore();
 
   // Set up Mullvad WireGuard tunnel if configured
   if (config.mullvadAccount) {
@@ -36,15 +44,17 @@ async function main() {
     );
   }
 
-  const app = await buildApp(config);
+  const app = await buildApp(config, db, sessions);
   await app.listen({ port: config.port, host: config.host });
 
   // Graceful shutdown
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.on(signal, async () => {
       app.log.info(`Received ${signal}, shutting down...`);
+      sessions.clear();
       await app.close();
       await closeBrowser();
+      db.close();
       if (config.mullvadAccount) {
         await teardownMullvad(logger);
       }

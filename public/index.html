@@ -20,7 +20,11 @@
   <div id="app-view" hidden>
     <header>
       <h1>PPVDA</h1>
-      <button id="logout-btn">Log Out</button>
+      <nav class="header-nav">
+        <button id="settings-btn" class="btn-nav">Settings</button>
+        <button id="admin-btn" class="btn-nav" hidden>Admin</button>
+        <button id="logout-btn">Log Out</button>
+      </nav>
     </header>
 
     <section id="submit-section">
@@ -43,10 +47,62 @@
       </details>
     </section>
 
-    <section id="jobs-section">
-      <h2>Jobs</h2>
-      <div id="jobs-list">
-        <p class="empty">No jobs yet</p>
+    <!-- Settings Panel -->
+    <section id="settings-section" hidden>
+      <div id="settings-header">
+        <button id="settings-back-btn" class="btn-back">Back</button>
+        <h2>Settings</h2>
+      </div>
+
+      <div class="settings-group">
+        <h3>Darkreel Integration</h3>
+        <p class="settings-desc">Configure your Darkreel server credentials. They are encrypted and stored securely.</p>
+        <form id="darkreel-form">
+          <input type="url" id="dr-server" placeholder="Darkreel server URL" required>
+          <input type="text" id="dr-username" placeholder="Darkreel username" autocomplete="off" required>
+          <input type="password" id="dr-password" placeholder="Darkreel password" autocomplete="off" required>
+          <div class="settings-actions">
+            <button type="submit">Save Credentials</button>
+            <button type="button" id="dr-remove-btn" class="btn-danger" hidden>Remove</button>
+          </div>
+        </form>
+        <p id="dr-status" class="settings-status" hidden></p>
+      </div>
+
+      <div class="settings-group">
+        <h3>Change Password</h3>
+        <form id="password-form">
+          <input type="password" id="old-password" placeholder="Current password" autocomplete="current-password" required>
+          <input type="password" id="new-password" placeholder="New password (min 8 chars)" minlength="8" autocomplete="new-password" required>
+          <button type="submit">Change Password</button>
+        </form>
+        <p id="pw-status" class="settings-status" hidden></p>
+      </div>
+    </section>
+
+    <!-- Admin Panel -->
+    <section id="admin-section" hidden>
+      <div id="admin-header">
+        <button id="admin-back-btn" class="btn-back">Back</button>
+        <h2>User Management</h2>
+      </div>
+
+      <div class="settings-group">
+        <h3>Create User</h3>
+        <form id="create-user-form">
+          <input type="text" id="new-user-name" placeholder="Username" minlength="3" autocomplete="off" required>
+          <input type="password" id="new-user-pass" placeholder="Password (min 8 chars)" minlength="8" autocomplete="off" required>
+          <label class="checkbox-label">
+            <input type="checkbox" id="new-user-admin"> Admin
+          </label>
+          <button type="submit">Create User</button>
+        </form>
+        <p id="create-user-status" class="settings-status" hidden></p>
+      </div>
+
+      <div class="settings-group">
+        <h3>Users</h3>
+        <div id="user-list"></div>
       </div>
     </section>
   </div>

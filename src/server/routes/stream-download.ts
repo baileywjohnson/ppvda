@@ -48,44 +48,13 @@ export async function streamDownloadRoutes(
         timeoutMs: opts.downloadTimeoutMs,
       });
 
-      // Collect stderr for error detection
-      let stderr = '';
-      proc.stderr?.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString();
-      });
-
-      // Wait briefly for ffmpeg to start and potentially fail fast
-      const startError = await new Promise<string | null>((resolve) => {
-        const earlyFail = (code: number | null) => {
-          resolve(stderr || `ffmpeg exited with code ${code}`);
-        };
-        proc.once('close', earlyFail);
-
-        // Give ffmpeg 2s to fail or start producing output
-        const timer = setTimeout(() => {
-          proc.removeListener('close', earlyFail);
-          resolve(null);
-        }, 2000);
-
-        stdout.once('data', () => {
-          clearTimeout(timer);
-          proc.removeListener('close', earlyFail);
-          resolve(null);
-        });
-      });
-
-      if (startError) {
-        kill();
-        reply.status(502).send({ success: false, error: 'Failed to process video' });
-        return;
-      }
-
-      // Take over the response
+      // Take over the response immediately
       reply.hijack();
       reply.raw.writeHead(200, {
         'Content-Type': 'video/mp4',
         'Content-Disposition': `attachment; filename="${safeName}"`,
         'Cache-Control': 'no-store',
+        'Transfer-Encoding': 'chunked',
       });
 
       // Clean up if client disconnects
@@ -93,10 +62,23 @@ export async function streamDownloadRoutes(
         kill();
       });
 
+      // Log ffmpeg errors (don't accumulate the full stderr — just last line for debugging)
+      let lastStderrLine = '';
+      proc.stderr?.on('data', (chunk: Buffer) => {
+        const lines = chunk.toString().trim().split('\n');
+        lastStderrLine = lines[lines.length - 1] || lastStderrLine;
+      });
+
+      proc.on('close', (code) => {
+        if (code !== 0 && code !== null) {
+          request.log.warn({ code, stderr: lastStderrLine }, 'ffmpeg stream exited with error');
+        }
+      });
+
       try {
         await pipeline(stdout, reply.raw);
       } catch {
-        // Connection dropped or ffmpeg error mid-stream — nothing to do
+        // Connection dropped or ffmpeg error mid-stream
       } finally {
         reply.raw.end();
       }

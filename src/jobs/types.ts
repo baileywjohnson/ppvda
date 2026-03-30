@@ -2,6 +2,7 @@ export type JobStatus = 'extracting' | 'downloading' | 'encrypting' | 'done' | '
 
 export interface Job {
   id: string;
+  userId: string;
   status: JobStatus;
   createdAt: string;
   updatedAt: string;
@@ -26,5 +27,5 @@ export interface JobEvent {
   darkreelMediaId?: string;
 }
 
-/** What the API returns — filePath stripped */
-export type JobResponse = Omit<Job, 'filePath'>;
+/** What the API returns — internal fields stripped */
+export type JobResponse = Omit<Job, 'filePath' | 'userId'>;

@@ -16,35 +16,35 @@ export interface DrkUploadResult {
 
 /**
  * Spawns the `drk upload` CLI to encrypt and upload a file to Darkreel.
- * Returns when the process exits.
+ * Credentials are passed via environment variables (DRK_SERVER, DRK_USER, DRK_PASS)
+ * instead of CLI arguments to prevent exposure in `ps aux` / /proc/pid/cmdline.
  */
 export async function uploadToDarkreel(opts: DrkUploadOptions): Promise<DrkUploadResult> {
   const { drkBinaryPath, serverUrl, username, password, filePath, timeoutMs } = opts;
 
-  const args = [
-    'upload',
-    '-server', serverUrl,
-    '-user', username,
-    '-pass', password,
-    filePath,
-  ];
+  // Only pass the file path as a CLI arg — credentials go through env vars
+  const args = ['upload', filePath];
+
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? '',
+    HOME: process.env.HOME ?? '',
+    DRK_SERVER: serverUrl,
+    DRK_USER: username,
+    DRK_PASS: password,
+  };
 
   return new Promise<DrkUploadResult>((resolve, reject) => {
     const proc = spawn(drkBinaryPath, args, {
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    let stdout = '';
     let stderr = '';
 
     const timeout = setTimeout(() => {
       proc.kill('SIGKILL');
       reject(new Error(`drk upload timed out after ${timeoutMs}ms`));
     }, timeoutMs);
-
-    proc.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
 
     proc.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
@@ -55,9 +55,8 @@ export async function uploadToDarkreel(opts: DrkUploadOptions): Promise<DrkUploa
       if (code === 0) {
         resolve({ success: true });
       } else {
-        // Sanitize error — don't include URLs or credentials
-        const errorLine = stderr.trim().split('\n').pop() ?? `drk exited with code ${code}`;
-        resolve({ success: false, error: errorLine });
+        // Return generic error — don't leak stderr which may contain URLs or paths
+        resolve({ success: false, error: `Upload failed (exit code ${code})` });
       }
     });
 
@@ -66,7 +65,7 @@ export async function uploadToDarkreel(opts: DrkUploadOptions): Promise<DrkUploa
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         resolve({ success: false, error: `drk binary not found at: ${drkBinaryPath}` });
       } else {
-        resolve({ success: false, error: err.message });
+        resolve({ success: false, error: 'Upload process failed to start' });
       }
     });
   });

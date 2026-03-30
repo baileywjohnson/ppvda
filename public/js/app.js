@@ -13,19 +13,23 @@
   const resultsList = $('#results-list');
   const resultsTitle = $('#results-title');
   const backBtn = $('#back-btn');
-  const jobsList = $('#jobs-list');
   const logoutBtn = $('#logout-btn');
   const filteredSection = $('#filtered-section');
   const filteredList = $('#filtered-list');
   const filteredCount = $('#filtered-count');
+  const settingsBtn = $('#settings-btn');
+  const settingsSection = $('#settings-section');
+  const settingsBackBtn = $('#settings-back-btn');
+  const adminBtn = $('#admin-btn');
+  const adminSection = $('#admin-section');
+  const adminBackBtn = $('#admin-back-btn');
 
   let token = localStorage.getItem('ppvda_token');
-  let eventSource = null;
-  const jobs = new Map();
 
   // Feature flags (fetched from server)
   let enableThumbnails = false;
-  let darkreelEnabled = false;
+  let darkreelConfigured = false;
+  let isAdmin = false;
 
   // Extraction results (in-memory only, never persisted)
   let extractionResult = null;
@@ -205,7 +209,7 @@
       ? `<span class="quality-badge">${esc(v.quality)}</span>`
       : '';
 
-    const uploadBtn = darkreelEnabled
+    const uploadBtn = darkreelConfigured
       ? `<button class="btn-upload" data-idx="${idx}">Upload to Darkreel</button>`
       : '';
 
@@ -387,78 +391,11 @@
     }
   }
 
-  // --- SSE ---
-  function connectSSE() {
-    if (eventSource) eventSource.close();
-    eventSource = new EventSource('/jobs/events?token=' + encodeURIComponent(token));
-
-    eventSource.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        const id = data.id || data.jobId;
-        if (!id) return;
-
-        const existing = jobs.get(id) || {};
-        jobs.set(id, { ...existing, ...data, id });
-        renderJobs();
-      } catch { /* ignore bad messages */ }
-    };
-
-    eventSource.onerror = () => {
-      console.warn('SSE connection error');
-    };
-  }
-
-  // --- Jobs rendering ---
-  function renderJobs() {
-    const sorted = [...jobs.values()].sort(
-      (a, b) => new Date(b.createdAt || b.updatedAt || 0).getTime() -
-                new Date(a.createdAt || a.updatedAt || 0).getTime()
-    );
-
-    if (sorted.length === 0) {
-      jobsList.innerHTML = '<p class="empty">No jobs yet</p>';
-      return;
-    }
-
-    jobsList.innerHTML = sorted.map((job) => {
-      const id = job.id || job.jobId;
-      const status = job.status;
-      const meta = buildMeta(job);
-      const errorHtml = job.error ? `<div class="job-error">${esc(job.error)}</div>` : '';
-
-      return `
-        <div class="job-card">
-          <div>
-            <div class="job-id">${esc(id)}</div>
-            ${meta ? `<div class="job-meta">${meta}</div>` : ''}
-            ${errorHtml}
-          </div>
-          <span class="job-badge badge-${esc(status)}">${esc(status)}</span>
-        </div>
-      `;
-    }).join('');
-  }
-
-  function buildMeta(job) {
-    const parts = [];
-    if (job.format) parts.push(job.format.toUpperCase());
-    if (job.fileSize) parts.push(formatSize(job.fileSize));
-    if (job.durationSec) parts.push(formatDuration(job.durationSec));
-    return parts.join(' \u00b7 ');
-  }
-
   // --- Helpers ---
   async function tryEnterApp() {
     try {
-      const res = await api('/jobs');
+      const res = await api('/config');
       if (res.ok) {
-        const data = await res.json();
-        if (data.data) {
-          for (const job of data.data) {
-            jobs.set(job.id, job);
-          }
-        }
         showApp();
       } else {
         logout();
@@ -474,7 +411,10 @@
       if (res.ok) {
         const data = await res.json();
         enableThumbnails = data.enableThumbnails ?? false;
-        darkreelEnabled = data.darkreelEnabled ?? false;
+        darkreelConfigured = data.darkreelConfigured ?? false;
+        isAdmin = data.isAdmin ?? false;
+        // Show/hide admin button
+        adminBtn.hidden = !isAdmin;
       }
     } catch { /* defaults are fine */ }
   }
@@ -488,16 +428,12 @@
     loginView.hidden = true;
     appView.hidden = false;
     await fetchConfig();
-    renderJobs();
-    try { connectSSE(); } catch (err) { console.error('SSE connect error:', err); }
   }
 
   function logout() {
     token = null;
     extractionResult = null;
     localStorage.removeItem('ppvda_token');
-    if (eventSource) { eventSource.close(); eventSource = null; }
-    jobs.clear();
     hideResults();
     showLogin();
   }
@@ -551,4 +487,212 @@
     }
     return { events, remainder };
   }
+
+  // --- Settings ---
+  function showMainView() {
+    submitSection.hidden = false;
+    settingsSection.hidden = true;
+    adminSection.hidden = true;
+  }
+
+  settingsBtn.addEventListener('click', async () => {
+    submitSection.hidden = true;
+    resultsSection.hidden = true;
+    adminSection.hidden = true;
+    settingsSection.hidden = false;
+
+    // Check if Darkreel creds are configured
+    try {
+      const res = await api('/settings/darkreel');
+      if (res.ok) {
+        const data = await res.json();
+        const removeBtn = $('#dr-remove-btn');
+        removeBtn.hidden = !data.data.configured;
+        $('#dr-status').hidden = true;
+      }
+    } catch {}
+  });
+
+  settingsBackBtn.addEventListener('click', () => {
+    settingsSection.hidden = true;
+    showMainView();
+  });
+
+  // Darkreel creds form
+  $('#darkreel-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const status = $('#dr-status');
+    status.hidden = true;
+
+    try {
+      const res = await api('/settings/darkreel', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          server: $('#dr-server').value,
+          username: $('#dr-username').value,
+          password: $('#dr-password').value,
+        }),
+      });
+
+      if (res.ok) {
+        status.textContent = 'Credentials saved';
+        status.className = 'settings-status success';
+        status.hidden = false;
+        $('#dr-remove-btn').hidden = false;
+        darkreelConfigured = true;
+        // Clear the form
+        $('#dr-server').value = '';
+        $('#dr-username').value = '';
+        $('#dr-password').value = '';
+      } else {
+        const data = await res.json().catch(() => ({}));
+        status.textContent = data.error || 'Failed to save';
+        status.className = 'settings-status error';
+        status.hidden = false;
+      }
+    } catch {
+      status.textContent = 'Connection failed';
+      status.className = 'settings-status error';
+      status.hidden = false;
+    }
+  });
+
+  // Remove Darkreel creds
+  $('#dr-remove-btn').addEventListener('click', async () => {
+    const status = $('#dr-status');
+    try {
+      const res = await api('/settings/darkreel', { method: 'DELETE' });
+      if (res.ok) {
+        status.textContent = 'Credentials removed';
+        status.className = 'settings-status success';
+        status.hidden = false;
+        $('#dr-remove-btn').hidden = true;
+        darkreelConfigured = false;
+      }
+    } catch {
+      status.textContent = 'Failed to remove';
+      status.className = 'settings-status error';
+      status.hidden = false;
+    }
+  });
+
+  // Change password form
+  $('#password-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const status = $('#pw-status');
+    status.hidden = true;
+
+    try {
+      const res = await api('/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          oldPassword: $('#old-password').value,
+          newPassword: $('#new-password').value,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        status.textContent = 'Password changed';
+        status.className = 'settings-status success';
+        $('#old-password').value = '';
+        $('#new-password').value = '';
+      } else {
+        status.textContent = data.error || 'Failed';
+        status.className = 'settings-status error';
+      }
+      status.hidden = false;
+    } catch {
+      status.textContent = 'Connection failed';
+      status.className = 'settings-status error';
+      status.hidden = false;
+    }
+  });
+
+  // --- Admin ---
+  adminBtn.addEventListener('click', async () => {
+    submitSection.hidden = true;
+    resultsSection.hidden = true;
+    settingsSection.hidden = true;
+    adminSection.hidden = false;
+    await loadUsers();
+  });
+
+  adminBackBtn.addEventListener('click', () => {
+    adminSection.hidden = true;
+    showMainView();
+  });
+
+  async function loadUsers() {
+    const list = $('#user-list');
+    try {
+      const res = await api('/admin/users');
+      if (!res.ok) return;
+      const data = await res.json();
+      const users = data.data || [];
+
+      if (users.length === 0) {
+        list.innerHTML = '<p class="empty">No users</p>';
+        return;
+      }
+
+      list.innerHTML = users.map((u) => `
+        <div class="user-card">
+          <div class="user-card-info">
+            ${esc(u.username)}
+            ${u.is_admin ? '<span class="admin-badge">Admin</span>' : ''}
+          </div>
+          <button class="btn-danger" data-delete-user="${esc(u.id)}" ${u.is_admin ? 'disabled' : ''}>Delete</button>
+        </div>
+      `).join('');
+
+      list.querySelectorAll('[data-delete-user]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          if (!confirm('Delete this user?')) return;
+          const userId = btn.dataset.deleteUser;
+          const res = await api(`/admin/users/${userId}`, { method: 'DELETE' });
+          if (res.ok) await loadUsers();
+        });
+      });
+    } catch {}
+  }
+
+  // Create user form
+  $('#create-user-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const status = $('#create-user-status');
+    status.hidden = true;
+
+    try {
+      const res = await api('/admin/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: $('#new-user-name').value,
+          password: $('#new-user-pass').value,
+          isAdmin: $('#new-user-admin').checked,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        status.textContent = `User "${data.data?.username}" created`;
+        status.className = 'settings-status success';
+        $('#new-user-name').value = '';
+        $('#new-user-pass').value = '';
+        $('#new-user-admin').checked = false;
+        await loadUsers();
+      } else {
+        status.textContent = data.error || 'Failed';
+        status.className = 'settings-status error';
+      }
+      status.hidden = false;
+    } catch {
+      status.textContent = 'Connection failed';
+      status.className = 'settings-status error';
+      status.hidden = false;
+    }
+  });
 })();
