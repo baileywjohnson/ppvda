@@ -259,10 +259,11 @@ header h1 {
   min-width: 0;
 }
 
-.video-badges {
+.video-tags {
   display: flex;
   gap: 0.375rem;
   flex-wrap: wrap;
+  align-items: center;
   margin-bottom: 0.375rem;
 }
 
@@ -286,6 +287,14 @@ header h1 {
   border-radius: 9999px;
   background: rgba(255,255,255,0.08);
   color: var(--text);
+}
+
+.meta-tag {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 9999px;
+  background: rgba(255,255,255,0.06);
+  color: var(--text-muted);
 }
 
 .video-domain {
@@ -340,8 +349,55 @@ header h1 {
   margin-right: 0.5rem;
 }
 
+.spinner-mini {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 1.5px solid var(--border);
+  border-top-color: var(--text-muted);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  vertical-align: middle;
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
 
 #extract-error { margin-top: 0.5rem; }
+
+/* --- Filtered / hidden results --- */
+#filtered-section {
+  margin-top: 1rem;
+}
+
+#filtered-section summary {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.5rem 0;
+  user-select: none;
+}
+
+#filtered-section summary:hover {
+  color: var(--text);
+}
+
+#filtered-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  opacity: 0.6;
+}
+
+#filtered-list .video-card {
+  border-style: dashed;
+}
+
+.results-loading {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 1rem 0;
+  font-size: 0.85rem;
+}

@@ -48,7 +48,7 @@ export function loadConfig(): AppConfig {
     proxyUrl: process.env.PROXY_URL || undefined,
     downloadDir: process.env.DOWNLOAD_DIR ?? './downloads',
     browserTimeoutMs: parseInt(process.env.BROWSER_TIMEOUT_MS ?? '30000', 10),
-    networkIdleMs: parseInt(process.env.NETWORK_IDLE_MS ?? '5000', 10),
+    networkIdleMs: parseInt(process.env.NETWORK_IDLE_MS ?? '2000', 10),
     downloadTimeoutMs: parseInt(process.env.DOWNLOAD_TIMEOUT_MS ?? '300000', 10),
     ffmpegPath: process.env.FFMPEG_PATH ?? 'ffmpeg',
     maxConcurrentDownloads: parseInt(process.env.MAX_CONCURRENT_DOWNLOADS ?? '3', 10),

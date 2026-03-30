@@ -15,6 +15,9 @@
   const backBtn = $('#back-btn');
   const jobsList = $('#jobs-list');
   const logoutBtn = $('#logout-btn');
+  const filteredSection = $('#filtered-section');
+  const filteredList = $('#filtered-list');
+  const filteredCount = $('#filtered-count');
 
   let token = localStorage.getItem('ppvda_token');
   let eventSource = null;
@@ -87,28 +90,75 @@
     btn.innerHTML = '<span class="spinner"></span>Extracting...';
     extractError.hidden = true;
 
+    // Switch to results view immediately with empty list
+    extractionResult = { videos: [], pageTitle: '' };
+    urlInput.value = '';
+    showResultsStreaming();
+
     try {
-      const res = await api('/extract', {
+      const res = await api('/extract/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
         if (data.error === 'Unauthorized') { logout(); return; }
         extractError.textContent = data.error || 'Extraction failed';
         extractError.hidden = false;
+        hideResults();
         return;
       }
 
-      extractionResult = data.data;
-      urlInput.value = '';
-      showResults();
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const parsed = parseSSEEvents(buffer);
+        buffer = parsed.remainder;
+
+        for (const evt of parsed.events) {
+          if (evt.event === 'video') {
+            const video = JSON.parse(evt.data);
+            extractionResult.videos.push(video);
+            addVideoCard(video, video._idx ?? extractionResult.videos.length - 1);
+          } else if (evt.event === 'metadata') {
+            const meta = JSON.parse(evt.data);
+            updateVideoMeta(meta._idx, meta);
+          } else if (evt.event === 'done') {
+            const info = JSON.parse(evt.data);
+            extractionResult.pageTitle = info.pageTitle || '';
+            removeLoadingIndicator();
+            updateResultsTitle();
+          } else if (evt.event === 'error') {
+            const info = JSON.parse(evt.data);
+            if (extractionResult.videos.length === 0) {
+              extractError.textContent = info.error || 'Extraction failed';
+              extractError.hidden = false;
+              hideResults();
+            }
+          }
+        }
+      }
+
+      // If no videos found at all
+      if (extractionResult.videos.length === 0) {
+        resultsList.innerHTML = '<p class="empty">No videos found on this page</p>';
+      }
     } catch {
-      extractError.textContent = 'Connection failed';
-      extractError.hidden = false;
+      if (extractionResult.videos.length === 0) {
+        extractError.textContent = 'Connection failed';
+        extractError.hidden = false;
+        hideResults();
+      }
     } finally {
+      removeLoadingIndicator();
       btn.disabled = false;
       btn.textContent = 'Extract';
     }
@@ -121,69 +171,146 @@
   });
 
   // --- Results rendering ---
-  function showResults() {
+  function showResultsStreaming() {
     submitSection.hidden = true;
     resultsSection.hidden = false;
+    resultsList.innerHTML = '<div class="results-loading"><span class="spinner"></span> Searching for videos...</div>';
+    updateResultsTitle();
+  }
 
-    const videos = extractionResult?.videos ?? [];
-    const title = extractionResult?.pageTitle;
-    resultsTitle.textContent = title
-      ? `${videos.length} video${videos.length !== 1 ? 's' : ''} found`
-      : 'Extracted Videos';
+  function updateResultsTitle() {
+    // Count only cards in the main results list (not filtered)
+    const mainCount = resultsList.querySelectorAll('.video-card').length;
+    const total = extractionResult?.videos?.length ?? 0;
+    if (total > 0) {
+      resultsTitle.textContent = `${mainCount} video${mainCount !== 1 ? 's' : ''} found`;
+    } else {
+      resultsTitle.textContent = 'Extracting...';
+    }
+  }
 
-    if (videos.length === 0) {
-      resultsList.innerHTML = '<p class="empty">No videos found on this page</p>';
-      return;
+  function addVideoCard(v, idx) {
+    // Remove the "searching" placeholder if it exists
+    const placeholder = resultsList.querySelector('.empty');
+    if (placeholder) placeholder.remove();
+
+    let domain = '';
+    try { domain = new URL(v.url).hostname; } catch {}
+
+    const thumbHtml = enableThumbnails
+      ? `<img class="video-thumb" loading="lazy" src="/thumbnail?videoUrl=${encodeURIComponent(v.url)}" alt="" width="160" height="90" onerror="this.style.display='none'">`
+      : '';
+
+    const qualityBadge = v.quality
+      ? `<span class="quality-badge">${esc(v.quality)}</span>`
+      : '';
+
+    const uploadBtn = darkreelEnabled
+      ? `<button class="btn-upload" data-idx="${idx}">Upload to Darkreel</button>`
+      : '';
+
+    const card = document.createElement('div');
+    card.className = 'video-card';
+    card.dataset.vidIdx = String(idx);
+    card.innerHTML = `
+      ${thumbHtml}
+      <div class="video-info">
+        <div class="video-tags" data-tags-idx="${idx}">
+          <span class="type-badge badge-${esc(v.type)}">${esc(v.type)}</span>
+          ${qualityBadge}
+          ${v.fileExtension ? `<span class="quality-badge">${esc(v.fileExtension)}</span>` : ''}
+          <span class="spinner-mini" data-probe-spinner="${idx}"></span>
+        </div>
+        <div class="video-domain">${esc(domain)}</div>
+        <div class="video-actions">
+          <button class="btn-download" data-idx="${idx}" disabled>Download</button>
+          ${uploadBtn.replace('class="btn-upload"', 'class="btn-upload" disabled')}
+        </div>
+      </div>
+    `;
+
+    // Attach handlers to this card's buttons
+    card.querySelector('.btn-download')?.addEventListener('click', (e) => handleDownload(e.target));
+    card.querySelector('.btn-upload')?.addEventListener('click', (e) => handleUpload(e.target));
+
+    // Insert before the loading indicator (if present), otherwise append
+    const loader = resultsList.querySelector('.results-loading');
+    if (loader) {
+      resultsList.insertBefore(card, loader);
+    } else {
+      resultsList.appendChild(card);
+    }
+    updateResultsTitle();
+  }
+
+  function removeLoadingIndicator() {
+    const loader = resultsList.querySelector('.results-loading');
+    if (loader) loader.remove();
+  }
+
+  function updateVideoMeta(idx, meta) {
+    // Find the card — could be in results or already in filtered
+    const card = resultsList.querySelector(`[data-vid-idx="${idx}"]`)
+              || filteredList.querySelector(`[data-vid-idx="${idx}"]`);
+    if (!card) return;
+
+    const tagsRow = card.querySelector(`[data-tags-idx="${idx}"]`);
+    if (!tagsRow) return;
+
+    // Remove the probe spinner and enable action buttons
+    const spinner = tagsRow.querySelector(`[data-probe-spinner="${idx}"]`);
+    if (spinner) spinner.remove();
+    card.querySelectorAll('.btn-download, .btn-upload').forEach((btn) => { btn.disabled = false; });
+
+    // Append quality badge if not already present
+    if (meta.quality && !tagsRow.querySelector('.quality-badge')) {
+      const span = document.createElement('span');
+      span.className = 'quality-badge';
+      span.textContent = meta.quality;
+      tagsRow.appendChild(span);
     }
 
-    resultsList.innerHTML = videos.map((v, i) => {
-      let domain = '';
-      try { domain = new URL(v.url).hostname; } catch {}
+    // Append duration
+    if (meta.durationSec) {
+      const span = document.createElement('span');
+      span.className = 'meta-tag';
+      span.textContent = formatDuration(meta.durationSec);
+      tagsRow.appendChild(span);
+    }
 
-      const thumbHtml = enableThumbnails
-        ? `<img class="video-thumb" loading="lazy" src="/thumbnail?videoUrl=${encodeURIComponent(v.url)}" alt="" width="160" height="90" onerror="this.style.display='none'">`
-        : '';
+    // Append file size
+    if (meta.fileSize) {
+      const span = document.createElement('span');
+      span.className = 'meta-tag';
+      span.textContent = formatSize(meta.fileSize);
+      tagsRow.appendChild(span);
+    }
 
-      const qualityBadge = v.quality
-        ? `<span class="quality-badge">${esc(v.quality)}</span>`
-        : '';
+    // Move tiny files / likely ads to the filtered section
+    const isTiny = meta.fileSize && meta.fileSize < 5120;
+    const isFlash = meta.durationSec && meta.durationSec <= 2;
+    if (isTiny || isFlash) {
+      moveToFiltered(card);
+    }
+  }
 
-      const uploadBtn = darkreelEnabled
-        ? `<button class="btn-upload" data-idx="${i}">Upload to Darkreel</button>`
-        : '';
-
-      return `
-        <div class="video-card">
-          ${thumbHtml}
-          <div class="video-info">
-            <div class="video-badges">
-              <span class="type-badge badge-${esc(v.type)}">${esc(v.type)}</span>
-              ${qualityBadge}
-              ${v.fileExtension ? `<span class="quality-badge">${esc(v.fileExtension)}</span>` : ''}
-            </div>
-            <div class="video-domain">${esc(domain)}</div>
-            <div class="video-actions">
-              <button class="btn-download" data-idx="${i}">Download</button>
-              ${uploadBtn}
-            </div>
-          </div>
-        </div>
-      `;
-    }).join('');
-
-    // Attach action handlers
-    resultsList.querySelectorAll('.btn-download').forEach((btn) => {
-      btn.addEventListener('click', () => handleDownload(btn));
-    });
-    resultsList.querySelectorAll('.btn-upload').forEach((btn) => {
-      btn.addEventListener('click', () => handleUpload(btn));
-    });
+  function moveToFiltered(card) {
+    // Only move if it's currently in the main results list
+    if (!resultsList.contains(card)) return;
+    card.remove();
+    filteredList.appendChild(card);
+    filteredSection.hidden = false;
+    filteredCount.textContent = filteredList.children.length;
+    updateResultsTitle();
   }
 
   function hideResults() {
     resultsSection.hidden = true;
     submitSection.hidden = false;
     resultsList.innerHTML = '';
+    filteredList.innerHTML = '';
+    filteredSection.hidden = true;
+    filteredCount.textContent = '0';
   }
 
   // --- Download to browser ---
@@ -399,5 +526,29 @@
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);
     return `${m}:${s.toString().padStart(2, '0')}`;
+  }
+
+  // Parse SSE events from a text buffer.
+  // Returns { events: [{event, data}], remainder: string }
+  function parseSSEEvents(buffer) {
+    const events = [];
+    const blocks = buffer.split('\n\n');
+    // Last element may be incomplete — keep as remainder
+    const remainder = blocks.pop() || '';
+
+    for (const block of blocks) {
+      if (!block.trim()) continue;
+      let event = 'message';
+      let data = '';
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event: ')) {
+          event = line.slice(7);
+        } else if (line.startsWith('data: ')) {
+          data = line.slice(6);
+        }
+      }
+      if (data) events.push({ event, data });
+    }
+    return { events, remainder };
   }
 })();

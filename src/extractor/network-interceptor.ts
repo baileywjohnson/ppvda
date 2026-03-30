@@ -2,9 +2,52 @@ import type { Page, Response } from 'playwright';
 import { classifyUrl, isSegmentUrl } from './patterns.js';
 import type { VideoSource } from './types.js';
 
+/** Common ad/tracking domains that serve video-format creatives or beacons */
+const AD_DOMAINS = new Set([
+  'doubleclick.net',
+  'googlesyndication.com',
+  'googleadservices.com',
+  'googleads.g.doubleclick.net',
+  'moatads.com',
+  'serving-sys.com',
+  'adnxs.com',
+  'adsrvr.org',
+  'adcolony.com',
+  'rubiconproject.com',
+  'pubmatic.com',
+  'casalemedia.com',
+  'openx.net',
+  'criteo.com',
+  'taboola.com',
+  'outbrain.com',
+  'amazon-adsystem.com',
+  'facebook.net',
+  'fbcdn.net',
+  'adsafeprotected.com',
+  'imasdk.googleapis.com',
+  'innovid.com',
+  'spotxchange.com',
+  'springserve.com',
+  'teads.tv',
+  'videohub.tv',
+  'extremereach.io',
+  'sharethrough.com',
+]);
+
+function isAdDomain(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    for (const ad of AD_DOMAINS) {
+      if (host === ad || host.endsWith(`.${ad}`)) return true;
+    }
+  } catch {}
+  return false;
+}
+
 interface InterceptorOptions {
   timeoutMs: number;
   networkIdleMs: number;
+  onVideo?: (video: VideoSource) => void;
 }
 
 /**
@@ -62,15 +105,17 @@ export function interceptNetworkRequests(
     }
 
     const match = classifyUrl(url, contentType);
-    if (match && !found.has(url)) {
-      found.set(url, {
+    if (match && !found.has(url) && !isAdDomain(url)) {
+      const video: VideoSource = {
         url,
         type: match.type,
         mimeType: contentType || undefined,
         quality: match.quality,
         fileExtension: match.fileExtension,
         discoveredVia: 'network',
-      });
+      };
+      found.set(url, video);
+      options.onVideo?.(video);
     }
 
     resetIdle();

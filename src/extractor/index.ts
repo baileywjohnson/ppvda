@@ -104,6 +104,91 @@ export async function extractVideos(
   }
 }
 
+/**
+ * Streaming extraction — emits videos as they're discovered rather than
+ * waiting for the full extraction to complete. DOM scan runs in parallel
+ * with the network idle wait.
+ */
+export async function extractVideosStreaming(
+  options: ExtractOptions & {
+    proxy?: ProxyConfig;
+    onVideo: (video: VideoSource) => void;
+    onDone: (result: ExtractionResult) => void;
+    onError: (error: Error) => void;
+  },
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 30000;
+  const networkIdleMs = options.networkIdleMs ?? 5000;
+  const startTime = Date.now();
+
+  const browser = await getBrowser(options.proxy);
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  // Track all emitted URLs to deduplicate across network + DOM
+  const emitted = new Set<string>();
+
+  function emitVideo(video: VideoSource) {
+    if (emitted.has(video.url)) return;
+    // Apply host filtering before emitting
+    const host = getHost(video.url);
+    if (options.allowedHosts?.length) {
+      if (!options.allowedHosts.some((a) => host === a || host.endsWith(`.${a}`))) return;
+    } else if (options.blockedHosts?.length) {
+      if (options.blockedHosts.some((b) => host === b || host.endsWith(`.${b}`))) return;
+    }
+    emitted.add(video.url);
+    options.onVideo(video);
+  }
+
+  try {
+    // Start network interception with streaming callback
+    const interceptor = interceptNetworkRequests(page, {
+      timeoutMs,
+      networkIdleMs,
+      onVideo: emitVideo,
+    });
+
+    // Navigate to the page
+    try {
+      await page.goto(options.url, {
+        waitUntil: 'domcontentloaded',
+        timeout: timeoutMs,
+      });
+    } catch {
+      interceptor.stop();
+      options.onError(new ExtractionError('Failed to load page', 'PAGE_LOAD_FAILED'));
+      return;
+    }
+
+    // Run DOM scan and network idle in parallel
+    const [networkVideos, domVideos] = await Promise.all([
+      interceptor.promise,
+      scanDomForVideos(page),
+    ]);
+
+    // Emit any DOM-discovered videos not already emitted via network
+    for (const v of domVideos) {
+      emitVideo(v);
+    }
+
+    const pageTitle = await page.title().catch(() => '');
+    const durationMs = Date.now() - startTime;
+
+    options.onDone({
+      pageUrl: options.url,
+      pageTitle,
+      videos: Array.from(emitted).map(() => ({} as VideoSource)), // not used by caller
+      extractedAt: new Date().toISOString(),
+      durationMs,
+    });
+  } catch (err) {
+    options.onError(err instanceof Error ? err : new Error(String(err)));
+  } finally {
+    await context.close().catch(() => {});
+  }
+}
+
 function deduplicateVideos(videos: VideoSource[]): VideoSource[] {
   const seen = new Map<string, VideoSource>();
   for (const v of videos) {
