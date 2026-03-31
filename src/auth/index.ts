@@ -81,6 +81,12 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
   app.post<{ Body: { username: string; password: string } }>(
     '/auth/login',
     {
+      config: {
+        rateLimit: {
+          max: 5,
+          timeWindow: '1 minute',
+        },
+      },
       schema: {
         body: {
           type: 'object',

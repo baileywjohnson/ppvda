@@ -2,6 +2,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import type { AppConfig } from '../config.js';
 import type { DB } from '../db/index.js';
@@ -31,6 +32,12 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
   });
 
   await app.register(cors, { origin: false });
+
+  // Global rate limit: 100 requests per minute per IP
+  await app.register(rateLimit, {
+    max: 100,
+    timeWindow: '1 minute',
+  });
 
   // Auth (JWT + cookie + login/logout/change-password routes)
   const { authenticate, requireAdmin } = await setupAuth(app, {
