@@ -2,6 +2,7 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import type { DB } from '../../db/index.js';
 import type { SessionStore } from '../../auth/sessions.js';
 import { createUser } from '../../auth/index.js';
+import { isStrongPassword, PASSWORD_REQUIREMENTS } from '../../crypto/index.js';
 
 interface AdminRouteOpts {
   db: DB;
@@ -33,7 +34,7 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
           required: ['username', 'password'],
           properties: {
             username: { type: 'string', minLength: 3 },
-            password: { type: 'string', minLength: 8 },
+            password: { type: 'string', minLength: 16 },
             isAdmin: { type: 'boolean' },
           },
           additionalProperties: false,
@@ -43,6 +44,11 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
     async (request, reply) => {
       const { username, password, isAdmin } = request.body;
       const adminUserId = (request as any).user.sub;
+
+      if (!isStrongPassword(password)) {
+        reply.status(400).send({ success: false, error: PASSWORD_REQUIREMENTS });
+        return;
+      }
 
       // Check username availability
       if (db.getUserByUsername(username)) {

@@ -69,6 +69,18 @@ export function verifyPassword(password: string, stored: string): boolean {
   return timingSafeEqual(computed, expectedHash);
 }
 
+// --- Password strength ---
+
+export function isStrongPassword(pw: string): boolean {
+  if (pw.length < 16 || pw.length > 128) return false;
+  const hasLetter = /[a-zA-Z]/.test(pw);
+  const hasDigit = /[0-9]/.test(pw);
+  const hasSymbol = /[^a-zA-Z0-9\s]/.test(pw);
+  return hasLetter && hasDigit && hasSymbol;
+}
+
+export const PASSWORD_REQUIREMENTS = '16+ characters with at least one letter, one number, and one symbol';
+
 // --- Convenience: encrypt/decrypt JSON ---
 
 export function encryptJSON(data: unknown, key: Buffer): { ciphertext: Buffer; nonce: Buffer } {

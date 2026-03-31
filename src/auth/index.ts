@@ -7,7 +7,7 @@ import {
   hashPassword, verifyPassword,
   deriveKeyFromPassword, generateSalt,
   encrypt, decrypt, generateMasterKey,
-  zeroBuffer,
+  zeroBuffer, isStrongPassword, PASSWORD_REQUIREMENTS,
 } from '../crypto/index.js';
 
 interface AuthOpts {
@@ -158,7 +158,7 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
           required: ['oldPassword', 'newPassword'],
           properties: {
             oldPassword: { type: 'string', minLength: 1 },
-            newPassword: { type: 'string', minLength: 8 },
+            newPassword: { type: 'string', minLength: 16 },
           },
           additionalProperties: false,
         },
@@ -167,6 +167,11 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
     async (request, reply) => {
       const { sub: userId } = (request as any).user;
       const { oldPassword, newPassword } = request.body;
+
+      if (!isStrongPassword(newPassword)) {
+        reply.status(400).send({ success: false, error: PASSWORD_REQUIREMENTS });
+        return;
+      }
 
       const user = db.getUserById(userId);
       if (!user || !verifyPassword(oldPassword, user.password_hash)) {

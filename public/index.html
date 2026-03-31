@@ -73,7 +73,7 @@
         <h3>Change Password</h3>
         <form id="password-form">
           <input type="password" id="old-password" placeholder="Current password" autocomplete="current-password" required>
-          <input type="password" id="new-password" placeholder="New password (min 8 chars)" minlength="8" autocomplete="new-password" required>
+          <input type="password" id="new-password" placeholder="New password (16+ chars, letter + number + symbol)" minlength="16" autocomplete="new-password" required>
           <button type="submit">Change Password</button>
         </form>
         <p id="pw-status" class="settings-status" hidden></p>
@@ -91,7 +91,7 @@
         <h3>Create User</h3>
         <form id="create-user-form">
           <input type="text" id="new-user-name" placeholder="Username" minlength="3" autocomplete="off" required>
-          <input type="password" id="new-user-pass" placeholder="Password (min 8 chars)" minlength="8" autocomplete="off" required>
+          <input type="password" id="new-user-pass" placeholder="Password (16+ chars, letter + number + symbol)" minlength="16" autocomplete="off" required>
           <label class="checkbox-label">
             <input type="checkbox" id="new-user-admin"> Admin
           </label>

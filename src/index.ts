@@ -6,6 +6,7 @@ import { createLogger } from './utils/logger.js';
 import { DB } from './db/index.js';
 import { SessionStore } from './auth/sessions.js';
 import { bootstrapAdmin } from './auth/index.js';
+import { isStrongPassword } from './crypto/index.js';
 
 async function main() {
   const config = loadConfig();
@@ -19,6 +20,9 @@ async function main() {
   if (db.getUserCount() === 0) {
     if (!config.adminPassword) {
       throw new Error('PPVDA_ADMIN_PASSWORD must be set for first-run admin bootstrap');
+    }
+    if (!isStrongPassword(config.adminPassword)) {
+      throw new Error('PPVDA_ADMIN_PASSWORD must be 16+ characters with at least one letter, one number, and one symbol');
     }
     const masterKey = bootstrapAdmin(db, config.adminUsername, config.adminPassword);
     // Zero the master key — it will be decrypted on login
