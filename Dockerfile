@@ -63,4 +63,6 @@ ENV MULLVAD_CONFIG_DIR=/app/mullvad
 ENV DRK_BINARY_PATH=/usr/local/bin/darkreel-cli
 
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
 CMD ["node", "dist/index.js"]

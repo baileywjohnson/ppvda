@@ -92,6 +92,12 @@ User Password --> PBKDF2 --> user_key
 | Usernames | Yes (plaintext) | SQLite DB -- use non-identifying usernames |
 | Passwords | Hashed (scrypt) | SQLite DB |
 
+### Password requirements
+
+- 16-128 characters
+- Must contain at least one letter, one number, and one symbol
+- Avoid `$` in `.env` files (dotenv interprets it as variable substitution)
+
 ### Password hashing
 
 Passwords are hashed with scrypt (N=16384, r=8, p=1, 64-byte output) with a random 32-byte salt per user. The PBKDF2 key derivation for credential encryption uses SHA-256 with 100,000 iterations.
@@ -163,7 +169,7 @@ Each user configures their own Darkreel credentials independently via **Settings
 
 1. Set up a [Darkreel](https://github.com/baileywjohnson/darkreel) server and create an account
 2. Install [darkreel-cli](https://github.com/baileywjohnson/darkreel-cli#install) on the PPVDA server (make sure it's in PATH or set `DRK_BINARY_PATH`)
-3. In the PPVDA web UI, go to **Settings** and enter your Darkreel server URL, username, and password
+3. In the PPVDA web UI, go to **Settings** and enter your Darkreel server URL, username, and password. Credentials are validated against the Darkreel server before being saved -- you'll get an error if the connection or login fails.
 4. The "Upload to Darkreel" button will now appear on extracted videos
 
 When you click "Upload to Darkreel", the pipeline runs: **download --> encrypt (via darkreel-cli) --> upload to Darkreel --> delete local file**. Credentials are passed to darkreel-cli via environment variables (not CLI args) to prevent exposure in `ps aux`.
@@ -313,6 +319,8 @@ For use in Docker. Sets up a WireGuard tunnel so all container traffic routes th
 | `ENABLE_THUMBNAILS` | `false` | Enable video thumbnail previews in extraction results |
 | `MAX_JOB_HISTORY` | `100` | Max completed jobs kept in memory |
 
+Jobs stuck in a non-terminal state for more than 15 minutes are automatically marked as failed.
+
 ## Docker
 
 The Docker image includes ffmpeg, Chromium, WireGuard tools, and downloads the latest `darkreel-cli` binary automatically.
@@ -405,6 +413,10 @@ docker compose up --build
 - The `darkreel-cli` subprocess receives credentials via environment variables, not CLI arguments
 - CORS is disabled (same-origin only)
 - JWTs contain only user ID and role -- no username
+- Authentication uses httpOnly cookies only -- no tokens in localStorage
+- Security headers set on all responses: CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+- Darkreel credentials are validated (test login) before being saved
+- Stuck jobs automatically time out after 15 minutes
 
 ## Related projects
 

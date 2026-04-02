@@ -50,6 +50,23 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
       const userId = (request as any).user.sub;
       const { server, username, password } = request.body;
 
+      // Test connection before saving
+      try {
+        const testRes = await fetch(`${server.replace(/\/+$/, '')}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        if (!testRes.ok) {
+          const text = await testRes.text().catch(() => '');
+          reply.status(400).send({ success: false, error: 'Darkreel login failed — check your credentials and server URL' });
+          return;
+        }
+      } catch {
+        reply.status(400).send({ success: false, error: 'Could not connect to Darkreel server — check the URL' });
+        return;
+      }
+
       const masterKey = sessions.get(userId);
       if (!masterKey) {
         reply.status(401).send({ success: false, error: 'Session expired, please re-login' });

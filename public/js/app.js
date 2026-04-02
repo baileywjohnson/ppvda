@@ -24,7 +24,7 @@
   const adminSection = $('#admin-section');
   const adminBackBtn = $('#admin-back-btn');
 
-  let token = localStorage.getItem('ppvda_token');
+  let loggedIn = false; // track auth state; cookie handles actual auth
 
   // Feature flags (fetched from server)
   let enableThumbnails = false;
@@ -35,11 +35,7 @@
   let extractionResult = null;
 
   // --- Init ---
-  if (token) {
-    tryEnterApp();
-  } else {
-    showLogin();
-  }
+  tryEnterApp();
 
   // --- Auth ---
   loginForm.addEventListener('submit', async (e) => {
@@ -65,8 +61,7 @@
         return;
       }
 
-      token = data.token;
-      localStorage.setItem('ppvda_token', token);
+      loggedIn = true; // cookie set by server via Set-Cookie
       showApp();
     } catch (err) {
       console.error('Login error:', err);
@@ -431,9 +426,8 @@
   }
 
   function logout() {
-    token = null;
+    loggedIn = false;
     extractionResult = null;
-    localStorage.removeItem('ppvda_token');
     hideResults();
     // Reset all sections to default state
     settingsSection.hidden = true;
@@ -447,8 +441,7 @@
 
   function api(path, opts = {}) {
     const headers = { ...opts.headers };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    return fetch(path, { ...opts, headers });
+    return fetch(path, { ...opts, headers, credentials: 'same-origin' });
   }
 
   function esc(str) {

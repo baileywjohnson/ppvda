@@ -1,13 +1,34 @@
 import type { Job, JobEvent, JobResponse } from './types.js';
 import { generateId } from '../utils/id.js';
 
+const JOB_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+const SWEEP_INTERVAL_MS = 60 * 1000; // check every minute
+
 export class JobStore {
   private jobs = new Map<string, Job>();
   private listeners = new Set<(event: JobEvent) => void>();
   private maxHistory: number;
+  private sweepTimer: ReturnType<typeof setInterval>;
 
   constructor(maxHistory: number) {
     this.maxHistory = maxHistory;
+    // Periodically mark stuck jobs as failed
+    this.sweepTimer = setInterval(() => this.sweepStale(), SWEEP_INTERVAL_MS);
+  }
+
+  stop() {
+    clearInterval(this.sweepTimer);
+  }
+
+  private sweepStale() {
+    const now = Date.now();
+    for (const job of this.jobs.values()) {
+      if (job.status === 'done' || job.status === 'failed') continue;
+      const updated = new Date(job.updatedAt).getTime();
+      if (now - updated > JOB_TIMEOUT_MS) {
+        this.update(job.id, { status: 'failed', error: 'Job timed out' });
+      }
+    }
   }
 
   create(userId: string): Job {
