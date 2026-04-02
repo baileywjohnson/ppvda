@@ -435,6 +435,13 @@
     extractionResult = null;
     localStorage.removeItem('ppvda_token');
     hideResults();
+    // Reset all sections to default state
+    settingsSection.hidden = true;
+    adminSection.hidden = true;
+    submitSection.hidden = false;
+    // Clear login form
+    $('#username').value = '';
+    $('#password').value = '';
     showLogin();
   }
 
