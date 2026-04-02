@@ -39,12 +39,17 @@ export async function uploadToDarkreel(opts: DrkUploadOptions): Promise<DrkUploa
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    let stdout = '';
     let stderr = '';
 
     const timeout = setTimeout(() => {
       proc.kill('SIGKILL');
       reject(new Error(`drk upload timed out after ${timeoutMs}ms`));
     }, timeoutMs);
+
+    proc.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
 
     proc.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
@@ -55,8 +60,7 @@ export async function uploadToDarkreel(opts: DrkUploadOptions): Promise<DrkUploa
       if (code === 0) {
         resolve({ success: true });
       } else {
-        // Return generic error — don't leak stderr which may contain URLs or paths
-        resolve({ success: false, error: `Upload failed (exit code ${code})` });
+        resolve({ success: false, error: `Upload failed (exit code ${code}): stdout=${stdout.trim()} stderr=${stderr.trim()}` });
       }
     });
 

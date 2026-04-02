@@ -74,30 +74,50 @@ export async function getDefaultGateway(): Promise<string | null> {
 }
 
 /**
- * Add a route exception so traffic to a specific IP bypasses the WireGuard tunnel
- * and goes through the original default gateway instead.
+ * Resolve a hostname to IPs and store the mappings.
+ * Must be called BEFORE the tunnel starts (while Docker's DNS is still available).
  */
-export async function addRouteException(hostname: string, gateway: string): Promise<void> {
-  try {
-    // Resolve hostname to IP(s)
-    let addresses: string[] = await dns.resolve4(hostname).catch(() => [] as string[]);
-    // If it's already an IP, use it directly
-    if (addresses.length === 0) {
-      const ipMatch = hostname.match(/^\d+\.\d+\.\d+\.\d+$/);
-      if (ipMatch) {
-        addresses = [hostname];
-      }
-    }
+export async function resolveBypassHost(hostname: string): Promise<string[]> {
+  // If it's already an IP, return it directly
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
+    return [hostname];
+  }
 
-    for (const ip of addresses) {
+  try {
+    // Use dns.lookup which checks /etc/hosts first (where Docker puts host.docker.internal)
+    const { address } = await dns.lookup(hostname);
+    return [address];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Add route exceptions so traffic to specific IPs bypasses the WireGuard tunnel,
+ * and write /etc/hosts entries so the hostnames resolve after VPN DNS takes over.
+ */
+export async function addRouteExceptions(
+  hosts: Array<{ hostname: string; ips: string[] }>,
+  gateway: string,
+): Promise<void> {
+  const { appendFile } = await import('node:fs/promises');
+
+  for (const { hostname, ips } of hosts) {
+    for (const ip of ips) {
+      // Add route to bypass VPN
       try {
         await execFileAsync('ip', ['route', 'add', `${ip}/32`, 'via', gateway]);
       } catch {
-        // Route may already exist — ignore
+        // Route may already exist
+      }
+
+      // Add /etc/hosts entry so hostname resolves after VPN DNS takes over
+      try {
+        await appendFile('/etc/hosts', `${ip} ${hostname}\n`);
+      } catch {
+        // Non-fatal
       }
     }
-  } catch {
-    // Non-fatal — uploads will just go through VPN
   }
 }
 

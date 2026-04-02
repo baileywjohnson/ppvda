@@ -7,7 +7,8 @@ import {
   saveDeviceInfo,
   loadDeviceInfo,
   getDefaultGateway,
-  addRouteException,
+  resolveBypassHost,
+  addRouteExceptions,
 } from './wireguard.js';
 import type { MullvadConfig, DeviceInfo } from './types.js';
 import type { Logger } from 'pino';
@@ -52,6 +53,20 @@ export async function setupMullvad(
   // Capture default gateway BEFORE tunnel overrides routing
   const gateway = await getDefaultGateway();
 
+  // Resolve bypass hostnames BEFORE tunnel starts (while Docker DNS is available)
+  const resolvedBypasses: Array<{ hostname: string; ips: string[] }> = [];
+  if (bypassHosts?.length) {
+    for (const host of bypassHosts) {
+      const ips = await resolveBypassHost(host);
+      if (ips.length > 0) {
+        resolvedBypasses.push({ hostname: host, ips });
+        logger.info({ host, ips }, 'Resolved VPN bypass host');
+      } else {
+        logger.warn({ host }, 'Could not resolve VPN bypass host');
+      }
+    }
+  }
+
   // Fetch relay list and find matching server
   logger.info('Finding Mullvad relay...');
   const relays = await getRelayList();
@@ -63,12 +78,10 @@ export async function setupMullvad(
 
   logger.info('WireGuard tunnel is up — all traffic routed through Mullvad');
 
-  // Add route exceptions for hosts that should bypass the VPN
-  if (gateway && bypassHosts?.length) {
-    for (const host of bypassHosts) {
-      await addRouteException(host, gateway);
-      logger.info({ host }, 'Added VPN bypass route');
-    }
+  // Add route exceptions + /etc/hosts entries for bypass hosts
+  if (gateway && resolvedBypasses.length > 0) {
+    await addRouteExceptions(resolvedBypasses, gateway);
+    logger.info('VPN bypass routes added');
   }
 }
 

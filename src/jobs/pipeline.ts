@@ -165,7 +165,8 @@ async function processJob(
 
     logger.info({ jobId }, 'Download complete');
   } catch (err) {
-    logger.error({ jobId }, 'Download failed');
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger.error({ jobId, err: errMsg }, 'Download failed');
     store.update(jobId, { status: 'failed', error: 'Download failed' });
     return;
   }
@@ -197,11 +198,12 @@ async function processJob(
         logger.info({ jobId }, 'Uploaded to Darkreel');
       } else {
         store.update(jobId, { status: 'failed', error: result.error ?? 'Darkreel upload failed' });
-        logger.error({ jobId }, 'Darkreel upload failed');
+        logger.error({ jobId, err: result.error }, 'Darkreel upload failed');
       }
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
       store.update(jobId, { status: 'failed', error: 'Darkreel upload failed' });
-      logger.error({ jobId }, 'Darkreel upload error');
+      logger.error({ jobId, err: errMsg }, 'Darkreel upload error');
     }
   } else {
     // No Darkreel configured — delete the local file (don't retain media on PPVDA)

@@ -29,17 +29,18 @@ export async function downloadVideo(options: FullDownloadOptions): Promise<Downl
     timeoutMs = 300000,
     proxy,
     ffmpegPath = 'ffmpeg',
-    tempDir = './tmp',
+    tempDir,
   } = options;
+  const effectiveTempDir = tempDir ?? join(outputDir, '.tmp');
 
   const id = generateId();
   const ext = type === 'direct' ? extFromUrl(url) : '.mp4';
   const finalFilename = sanitizeFilename(filename ?? filenameFromUrl(url)) + ext;
   const finalPath = join(outputDir, finalFilename);
-  const tmpPath = tempPath(tempDir, id, ext);
+  const tmpPath = tempPath(effectiveTempDir, id, ext);
 
   await ensureDir(outputDir);
-  await ensureDir(tempDir);
+  await ensureDir(effectiveTempDir);
 
   try {
     let durationSec: number | undefined;
