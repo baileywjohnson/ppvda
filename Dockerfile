@@ -1,11 +1,15 @@
 # --- Node base ---
 FROM node:20-bookworm-slim AS base
 
-# Install ffmpeg, WireGuard tools, and curl for downloading darkreel-cli
+# Install ffmpeg, WireGuard tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     wireguard-tools \
     iproute2 \
+    openresolv \
+    procps \
+    iptables \
+    ca-certificates \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -32,19 +36,10 @@ RUN npm run build
 FROM base AS runtime
 WORKDIR /app
 
-# Download darkreel-cli binary from GitHub releases
-# Override DARKREEL_CLI_VERSION at build time to pin a specific version
-ARG DARKREEL_CLI_VERSION=latest
-ARG TARGETARCH
-RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "amd64") && \
-    if [ "$DARKREEL_CLI_VERSION" = "latest" ]; then \
-      URL="https://github.com/baileywjohnson/darkreel-cli/releases/latest/download/darkreel-cli-linux-${ARCH}"; \
-    else \
-      URL="https://github.com/baileywjohnson/darkreel-cli/releases/download/${DARKREEL_CLI_VERSION}/darkreel-cli-linux-${ARCH}"; \
-    fi && \
-    echo "Downloading darkreel-cli from ${URL}" && \
-    curl -fSL -o /usr/local/bin/darkreel-cli "${URL}" && \
-    chmod +x /usr/local/bin/darkreel-cli
+# Copy darkreel-cli binary (pre-built for Linux)
+# To use GitHub releases instead, replace this COPY with the curl download block
+COPY darkreel-cli-linux /usr/local/bin/darkreel-cli
+RUN chmod +x /usr/local/bin/darkreel-cli
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
@@ -53,7 +48,7 @@ COPY package.json ./
 
 # Create non-root user (used when Mullvad/WireGuard is NOT needed)
 RUN groupadd -r ppvda && useradd -r -g ppvda -m ppvda \
-    && mkdir -p /app/downloads /app/tmp /app/mullvad \
+    && mkdir -p /app/downloads /app/tmp /app/mullvad /app/data \
     && chown -R ppvda:ppvda /app
 
 # Note: When using Mullvad/WireGuard, the container must run as root

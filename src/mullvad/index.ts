@@ -6,6 +6,8 @@ import {
   stopTunnel,
   saveDeviceInfo,
   loadDeviceInfo,
+  getDefaultGateway,
+  addRouteException,
 } from './wireguard.js';
 import type { MullvadConfig, DeviceInfo } from './types.js';
 import type { Logger } from 'pino';
@@ -22,7 +24,11 @@ let activeConfig: MullvadConfig | null = null;
  * 3. Fetch relay list and pick a server matching the requested location
  * 4. Generate WireGuard config and bring up the tunnel
  */
-export async function setupMullvad(config: MullvadConfig, logger: Logger): Promise<void> {
+export async function setupMullvad(
+  config: MullvadConfig,
+  logger: Logger,
+  bypassHosts?: string[],
+): Promise<void> {
   activeConfig = config;
 
   // Try to reuse a previously registered device
@@ -43,6 +49,9 @@ export async function setupMullvad(config: MullvadConfig, logger: Logger): Promi
 
   activeDevice = device;
 
+  // Capture default gateway BEFORE tunnel overrides routing
+  const gateway = await getDefaultGateway();
+
   // Fetch relay list and find matching server
   logger.info('Finding Mullvad relay...');
   const relays = await getRelayList();
@@ -53,6 +62,14 @@ export async function setupMullvad(config: MullvadConfig, logger: Logger): Promi
   await startTunnel(config.configDir, wgConfig);
 
   logger.info('WireGuard tunnel is up — all traffic routed through Mullvad');
+
+  // Add route exceptions for hosts that should bypass the VPN
+  if (gateway && bypassHosts?.length) {
+    for (const host of bypassHosts) {
+      await addRouteException(host, gateway);
+      logger.info({ host }, 'Added VPN bypass route');
+    }
+  }
 }
 
 /**

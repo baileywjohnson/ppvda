@@ -95,16 +95,17 @@ export async function getRelayList(): Promise<RelayCountry[]> {
   }
 
   const data = (await res.json()) as {
+    locations: Record<string, {
+      country: string;
+      city: string;
+      latitude: number;
+      longitude: number;
+    }>;
     wireguard: {
       port_ranges: number[][];
       relays: Array<{
         hostname: string;
-        country_code: string;
-        country_name: string;
-        city_code: string;
-        city_name: string;
-        latitude: number;
-        longitude: number;
+        location: string;
         active: boolean;
         owned: boolean;
         provider: string;
@@ -112,34 +113,41 @@ export async function getRelayList(): Promise<RelayCountry[]> {
         ipv4_addr_in: string;
         ipv6_addr_in: string;
         public_key: string;
-        multihop_port: number;
       }>;
     };
   };
 
-  // Group relays by country and city
+  // Group relays by country and city using the locations map
   const countryMap = new Map<string, RelayCountry>();
 
   for (const relay of data.wireguard.relays) {
     if (!relay.active) continue;
 
-    let country = countryMap.get(relay.country_code);
+    const loc = data.locations[relay.location];
+    if (!loc) continue;
+
+    // Location code is "country-city" (e.g., "se-mma")
+    const parts = relay.location.split('-');
+    const countryCode = parts[0];
+    const cityCode = relay.location; // full code like "se-mma"
+
+    let country = countryMap.get(countryCode);
     if (!country) {
       country = {
-        name: relay.country_name,
-        code: relay.country_code,
+        name: loc.country,
+        code: countryCode,
         cities: [],
       };
-      countryMap.set(relay.country_code, country);
+      countryMap.set(countryCode, country);
     }
 
-    let city = country.cities.find((c) => c.code === relay.city_code);
+    let city = country.cities.find((c) => c.code === cityCode);
     if (!city) {
       city = {
-        name: relay.city_name,
-        code: relay.city_code,
-        latitude: relay.latitude,
-        longitude: relay.longitude,
+        name: loc.city,
+        code: cityCode,
+        latitude: loc.latitude,
+        longitude: loc.longitude,
         relays: [],
       };
       country.cities.push(city);
@@ -150,7 +158,7 @@ export async function getRelayList(): Promise<RelayCountry[]> {
       publicKey: relay.public_key,
       ipv4AddrIn: relay.ipv4_addr_in,
       ipv6AddrIn: relay.ipv6_addr_in,
-      multihopPort: relay.multihop_port,
+      multihopPort: 0,
       weight: relay.weight,
       active: relay.active,
     });

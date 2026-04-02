@@ -11,7 +11,7 @@ interface ExtractBody {
 
 export async function extractRoutes(
   app: FastifyInstance,
-  opts: { proxyConfig?: ProxyConfig; defaultTimeoutMs: number; defaultNetworkIdleMs: number; preferredHosts: string[]; blockedHosts: string[]; allowedHosts: string[]; preHandler?: preHandlerHookHandler },
+  opts: { proxyConfig?: ProxyConfig; ffmpegPath: string; defaultTimeoutMs: number; defaultNetworkIdleMs: number; preferredHosts: string[]; blockedHosts: string[]; allowedHosts: string[]; preHandler?: preHandlerHookHandler },
 ) {
   app.post<{ Body: ExtractBody }>(
     '/extract',

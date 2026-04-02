@@ -45,6 +45,7 @@ async function main() {
         configDir: config.mullvadConfigDir,
       },
       logger,
+      config.vpnBypassHosts.length > 0 ? config.vpnBypassHosts : undefined,
     );
   }
 

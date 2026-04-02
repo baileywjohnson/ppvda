@@ -17,6 +17,7 @@ export interface AppConfig {
   mullvadAccount: string | undefined;
   mullvadLocation: string | undefined;
   mullvadConfigDir: string;
+  vpnBypassHosts: string[];
   preferredHosts: string[];
   blockedHosts: string[];
   allowedHosts: string[];
@@ -54,6 +55,7 @@ export function loadConfig(): AppConfig {
     mullvadAccount: process.env.MULLVAD_ACCOUNT || undefined,
     mullvadLocation: process.env.MULLVAD_LOCATION || undefined,
     mullvadConfigDir: process.env.MULLVAD_CONFIG_DIR ?? './mullvad',
+    vpnBypassHosts: parseHostList(process.env.VPN_BYPASS_HOSTS),
     preferredHosts: parseHostList(process.env.PREFERRED_HOSTS),
     blockedHosts: parseHostList(process.env.BLOCKED_HOSTS),
     allowedHosts: parseHostList(process.env.ALLOWED_HOSTS),

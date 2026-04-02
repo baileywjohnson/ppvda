@@ -7,22 +7,22 @@ services:
       - PROXY_URL=${PROXY_URL:-}
       - MULLVAD_ACCOUNT=${MULLVAD_ACCOUNT:-}
       - MULLVAD_LOCATION=${MULLVAD_LOCATION:-}
-      - LOG_LEVEL=debug
-      # Auth (PPVDA_PASSWORD is required)
-      - PPVDA_USERNAME=${PPVDA_USERNAME:-admin}
-      - PPVDA_PASSWORD=${PPVDA_PASSWORD:?PPVDA_PASSWORD must be set}
+      - VPN_BYPASS_HOSTS=${VPN_BYPASS_HOSTS:-}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # Auth (PPVDA_ADMIN_PASSWORD required on first run)
+      - PPVDA_ADMIN_USERNAME=${PPVDA_ADMIN_USERNAME:-admin}
+      - PPVDA_ADMIN_PASSWORD=${PPVDA_ADMIN_PASSWORD:-}
       - JWT_SECRET=${JWT_SECRET:-}
-      # Darkreel integration (optional)
-      - DARKREEL_SERVER=${DARKREEL_SERVER:-}
-      - DARKREEL_USER=${DARKREEL_USER:-}
-      - DARKREEL_PASS=${DARKREEL_PASS:-}
+      # Database
+      - DB_PATH=/app/data/ppvda.db
+      # Features
+      - ENABLE_THUMBNAILS=${ENABLE_THUMBNAILS:-false}
+      - MAX_CONCURRENT_DOWNLOADS=${MAX_CONCURRENT_DOWNLOADS:-3}
     volumes:
       - ./downloads:/app/downloads
+      - ./data:/app/data
       - ./mullvad:/app/mullvad
     # Required for WireGuard tunnel (Mullvad)
-    cap_add:
-      - NET_ADMIN
+    privileged: true
     devices:
       - /dev/net/tun:/dev/net/tun
-    sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1

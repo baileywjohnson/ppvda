@@ -2,6 +2,7 @@ import { writeFile, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import dns from 'node:dns/promises';
 import { ensureDir } from '../utils/fs.js';
 import type { DeviceInfo, RelayServer } from './types.js';
 
@@ -16,12 +17,12 @@ const WG_PORT = 51820;
 export function generateWgConfig(device: DeviceInfo, server: RelayServer): string {
   return `[Interface]
 PrivateKey = ${device.privateKey}
-Address = ${device.ipv4Address}, ${device.ipv6Address}
+Address = ${device.ipv4Address}
 DNS = 10.64.0.1
 
 [Peer]
 PublicKey = ${server.publicKey}
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = 0.0.0.0/0
 Endpoint = ${server.ipv4AddrIn}:${WG_PORT}
 `;
 }
@@ -56,6 +57,48 @@ export async function stopTunnel(configDir: string): Promise<void> {
   }
 
   await unlink(configPath).catch(() => {});
+}
+
+/**
+ * Get the default gateway IP before the tunnel overrides it.
+ */
+export async function getDefaultGateway(): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('ip', ['route', 'show', 'default']);
+    // "default via 172.17.0.1 dev eth0"
+    const match = stdout.match(/default via (\S+)/);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Add a route exception so traffic to a specific IP bypasses the WireGuard tunnel
+ * and goes through the original default gateway instead.
+ */
+export async function addRouteException(hostname: string, gateway: string): Promise<void> {
+  try {
+    // Resolve hostname to IP(s)
+    let addresses: string[] = await dns.resolve4(hostname).catch(() => [] as string[]);
+    // If it's already an IP, use it directly
+    if (addresses.length === 0) {
+      const ipMatch = hostname.match(/^\d+\.\d+\.\d+\.\d+$/);
+      if (ipMatch) {
+        addresses = [hostname];
+      }
+    }
+
+    for (const ip of addresses) {
+      try {
+        await execFileAsync('ip', ['route', 'add', `${ip}/32`, 'via', gateway]);
+      } catch {
+        // Route may already exist — ignore
+      }
+    }
+  } catch {
+    // Non-fatal — uploads will just go through VPN
+  }
 }
 
 /**
