@@ -197,7 +197,7 @@
     try { domain = new URL(v.url).hostname; } catch {}
 
     const thumbHtml = enableThumbnails
-      ? `<img class="video-thumb" loading="lazy" src="/thumbnail?videoUrl=${encodeURIComponent(v.url)}" alt="" width="160" height="90" onerror="this.style.display='none'">`
+      ? `<img class="video-thumb" loading="lazy" src="/thumbnail?videoUrl=${encodeURIComponent(v.url)}" alt="" width="160" height="90">`
       : '';
 
     const qualityBadge = v.quality
@@ -231,6 +231,8 @@
     // Attach handlers to this card's buttons
     card.querySelector('.btn-download')?.addEventListener('click', (e) => handleDownload(e.target));
     card.querySelector('.btn-upload')?.addEventListener('click', (e) => handleUpload(e.target));
+    const thumb = card.querySelector('.video-thumb');
+    if (thumb) thumb.addEventListener('error', () => { thumb.style.display = 'none'; });
 
     // Insert before the loading indicator (if present), otherwise append
     const loader = resultsList.querySelector('.results-loading');

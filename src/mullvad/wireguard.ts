@@ -42,6 +42,14 @@ export async function startTunnel(configDir: string, wgConfig: string): Promise<
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to start WireGuard tunnel: ${msg}`);
   }
+
+  // Docker manages /etc/resolv.conf and ignores resolvconf.
+  // Manually override DNS to use Mullvad's resolver through the tunnel.
+  try {
+    await writeFile('/etc/resolv.conf', 'nameserver 10.64.0.1\n', { mode: 0o644 });
+  } catch {
+    // Non-fatal — DNS will use Docker's resolver (less private but functional)
+  }
 }
 
 /**
