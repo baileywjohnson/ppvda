@@ -1,7 +1,12 @@
+import { createReadStream } from 'node:fs';
+import { stat, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { pipeline } from 'node:stream/promises';
-import { spawnFfmpegStream } from '../../downloader/ffmpeg.js';
+import { runFfmpeg } from '../../downloader/ffmpeg.js';
 import { streamDownloadRequestSchema } from '../schemas/stream-download.js';
+import { generateId } from '../../utils/id.js';
+import { ensureDir } from '../../utils/fs.js';
 import type { ProxyConfig } from '../../proxy/types.js';
 
 interface StreamDownloadBody {
@@ -14,6 +19,7 @@ export async function streamDownloadRoutes(
   opts: {
     proxyConfig?: ProxyConfig;
     ffmpegPath: string;
+    downloadDir: string;
     downloadTimeoutMs: number;
     preHandler?: preHandlerHookHandler;
   },
@@ -41,46 +47,47 @@ export async function streamDownloadRoutes(
 
       const safeName = sanitizeFilename(filename ?? 'video') + '.mp4';
 
-      const { proc, stdout, kill } = spawnFfmpegStream({
-        inputUrl: videoUrl,
-        ffmpegPath: opts.ffmpegPath,
-        proxyConfig: opts.proxyConfig,
-        timeoutMs: opts.downloadTimeoutMs,
-      });
-
-      // Take over the response immediately
-      reply.hijack();
-      reply.raw.writeHead(200, {
-        'Content-Type': 'video/mp4',
-        'Content-Disposition': `attachment; filename="${safeName}"`,
-        'Cache-Control': 'no-store',
-        'Transfer-Encoding': 'chunked',
-      });
-
-      // Clean up if client disconnects
-      request.raw.on('close', () => {
-        kill();
-      });
-
-      // Log ffmpeg errors (don't accumulate the full stderr — just last line for debugging)
-      let lastStderrLine = '';
-      proc.stderr?.on('data', (chunk: Buffer) => {
-        const lines = chunk.toString().trim().split('\n');
-        lastStderrLine = lines[lines.length - 1] || lastStderrLine;
-      });
-
-      proc.on('close', (code) => {
-        if (code !== 0 && code !== null) {
-          request.log.warn({ code }, 'ffmpeg stream exited with error');
-        }
-      });
+      // Download to a temp file with +faststart (produces a proper MP4)
+      const tempDir = join(opts.downloadDir, '..', 'tmp');
+      await ensureDir(tempDir);
+      const tempPath = join(tempDir, `stream-${generateId()}.mp4`);
 
       try {
-        await pipeline(stdout, reply.raw);
-      } catch {
-        // Connection dropped or ffmpeg error mid-stream
-      } finally {
-        reply.raw.end();
+        await runFfmpeg({
+          inputUrl: videoUrl,
+          outputPath: tempPath,
+          ffmpegPath: opts.ffmpegPath,
+          proxyConfig: opts.proxyConfig,
+          timeoutMs: opts.downloadTimeoutMs,
+        });
+
+        const fileStat = await stat(tempPath);
+
+        reply.hijack();
+        reply.raw.writeHead(200, {
+          'Content-Type': 'video/mp4',
+          'Content-Disposition': `attachment; filename="${safeName}"`,
+          'Content-Length': String(fileStat.size),
+          'Cache-Control': 'no-store',
+        });
+
+        // Clean up if client disconnects early
+        let aborted = false;
+        request.raw.on('close', () => { aborted = true; });
+
+        try {
+          await pipeline(createReadStream(tempPath), reply.raw);
+        } catch {
+          // Connection dropped mid-stream
+        } finally {
+          reply.raw.end();
+          // Delete temp file regardless of success
+          await unlink(tempPath).catch(() => {});
+        }
+      } catch (err) {
+        // ffmpeg failed — clean up and return error
+        await unlink(tempPath).catch(() => {});
+        reply.status(502).send({ success: false, error: 'Failed to download video' });
       }
     },
   );
