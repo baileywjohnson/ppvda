@@ -60,7 +60,15 @@ export async function uploadToDarkreel(opts: DrkUploadOptions): Promise<DrkUploa
       if (code === 0) {
         resolve({ success: true });
       } else {
-        resolve({ success: false, error: `Upload failed (exit code ${code}): stdout=${stdout.trim()} stderr=${stderr.trim()}` });
+        // Detect auth failures from CLI output
+        const combined = (stdout + stderr).toLowerCase();
+        if (combined.includes('401') || combined.includes('invalid credentials') || combined.includes('login failed')) {
+          resolve({ success: false, error: 'Darkreel authentication failed — check your credentials in Settings' });
+        } else if (combined.includes('connect') || combined.includes('no such host') || combined.includes('connection refused')) {
+          resolve({ success: false, error: 'Could not connect to Darkreel server — check the server URL in Settings' });
+        } else {
+          resolve({ success: false, error: `Upload failed (exit code ${code})` });
+        }
       }
     });
 
