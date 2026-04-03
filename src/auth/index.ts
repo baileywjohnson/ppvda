@@ -147,6 +147,40 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
     reply.clearCookie('token', { path: '/' }).send({ success: true });
   });
 
+  // --- Delete Own Account ---
+  app.delete<{ Body: { password: string } }>(
+    '/auth/account',
+    {
+      preHandler: authenticate,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['password'],
+          properties: {
+            password: { type: 'string', minLength: 1 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { sub: userId } = (request as any).user;
+      const { password } = request.body;
+
+      const user = db.getUserById(userId);
+      if (!user || !verifyPassword(password, user.password_hash)) {
+        reply.status(400).send({ success: false, error: 'Password is incorrect' });
+        return;
+      }
+
+      sessions.delete(userId);
+      db.deleteDarkreelCreds(userId);
+      db.deleteUser(userId);
+
+      reply.clearCookie('token', { path: '/' }).send({ success: true });
+    },
+  );
+
   // --- Change Password ---
   app.post<{ Body: { oldPassword: string; newPassword: string } }>(
     '/auth/change-password',

@@ -110,6 +110,7 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
       enableThumbnails: config.enableThumbnails,
       darkreelConfigured: db.hasDarkreelCreds(userId),
       isAdmin,
+      userId,
     };
   });
 

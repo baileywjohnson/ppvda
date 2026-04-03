@@ -30,6 +30,7 @@
   let enableThumbnails = false;
   let darkreelConfigured = false;
   let isAdmin = false;
+  let currentUserId = null;
 
   // Extraction results (in-memory only, never persisted)
   let extractionResult = null;
@@ -197,7 +198,7 @@
     try { domain = new URL(v.url).hostname; } catch {}
 
     const thumbHtml = enableThumbnails
-      ? `<img class="video-thumb" loading="lazy" src="/thumbnail?videoUrl=${encodeURIComponent(v.url)}" alt="" width="160" height="90">`
+      ? `<div class="thumb-wrapper"><span class="spinner-mini thumb-spinner"></span><img class="video-thumb" loading="lazy" src="/thumbnail?videoUrl=${encodeURIComponent(v.url)}" alt="" width="160" height="90"></div>`
       : '';
 
     const qualityBadge = v.quality
@@ -232,7 +233,11 @@
     card.querySelector('.btn-download')?.addEventListener('click', (e) => handleDownload(e.target));
     card.querySelector('.btn-upload')?.addEventListener('click', (e) => handleUpload(e.target));
     const thumb = card.querySelector('.video-thumb');
-    if (thumb) thumb.addEventListener('error', () => { thumb.style.display = 'none'; });
+    const thumbSpinner = card.querySelector('.thumb-spinner');
+    if (thumb) {
+      thumb.addEventListener('load', () => { if (thumbSpinner) thumbSpinner.style.display = 'none'; });
+      thumb.addEventListener('error', () => { const w = card.querySelector('.thumb-wrapper'); if (w) w.style.display = 'none'; });
+    }
 
     // Insert before the loading indicator (if present), otherwise append
     const loader = resultsList.querySelector('.results-loading');
@@ -363,7 +368,7 @@
     if (!video) return;
 
     btn.disabled = true;
-    btn.textContent = 'Submitting...';
+    btn.innerHTML = '<span class="spinner-mini"></span> Sending...';
 
     try {
       const res = await api('/jobs', {
@@ -373,16 +378,15 @@
       });
 
       if (res.ok) {
-        btn.textContent = 'Submitted';
+        btn.textContent = 'Sent';
       } else {
         const data = await res.json().catch(() => ({}));
         if (data.error === 'Unauthorized') { logout(); return; }
-        alert(data.error || 'Failed to create job');
+        btn.textContent = 'Failed';
         btn.disabled = false;
-        btn.textContent = 'Upload to Darkreel';
       }
     } catch {
-      alert('Connection failed');
+      btn.textContent = 'Failed';
       btn.disabled = false;
       btn.textContent = 'Upload to Darkreel';
     }
@@ -410,6 +414,7 @@
         enableThumbnails = data.enableThumbnails ?? false;
         darkreelConfigured = data.darkreelConfigured ?? false;
         isAdmin = data.isAdmin ?? false;
+        currentUserId = data.userId ?? null;
         // Show/hide admin button
         adminBtn.hidden = !isAdmin;
       }
@@ -425,11 +430,23 @@
     loginView.hidden = true;
     appView.hidden = false;
     await fetchConfig();
+
+    // Restore active view
+    const savedView = sessionStorage.getItem('ppvda_view');
+    if (savedView === 'settings') {
+      submitSection.hidden = true;
+      settingsSection.hidden = false;
+    } else if (savedView === 'admin' && isAdmin) {
+      submitSection.hidden = true;
+      adminSection.hidden = false;
+      loadUsers();
+    }
   }
 
   function logout() {
     loggedIn = false;
     extractionResult = null;
+    sessionStorage.removeItem('ppvda_view');
     hideResults();
     // Reset all sections to default state
     settingsSection.hidden = true;
@@ -495,6 +512,7 @@
     submitSection.hidden = false;
     settingsSection.hidden = true;
     adminSection.hidden = true;
+    sessionStorage.setItem('ppvda_view', 'main');
   }
 
   settingsBtn.addEventListener('click', async () => {
@@ -502,6 +520,7 @@
     resultsSection.hidden = true;
     adminSection.hidden = true;
     settingsSection.hidden = false;
+    sessionStorage.setItem('ppvda_view', 'settings');
 
     // Check if Darkreel creds are configured
     try {
@@ -585,13 +604,22 @@
     const status = $('#pw-status');
     status.hidden = true;
 
+    const newPw = $('#new-password').value;
+    const confirmPw = $('#confirm-new-password').value;
+    if (newPw !== confirmPw) {
+      status.textContent = 'Passwords do not match';
+      status.className = 'settings-status error';
+      status.hidden = false;
+      return;
+    }
+
     try {
       const res = await api('/auth/change-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           oldPassword: $('#old-password').value,
-          newPassword: $('#new-password').value,
+          newPassword: newPw,
         }),
       });
 
@@ -601,11 +629,43 @@
         status.className = 'settings-status success';
         $('#old-password').value = '';
         $('#new-password').value = '';
+        $('#confirm-new-password').value = '';
       } else {
         status.textContent = data.error || 'Failed';
         status.className = 'settings-status error';
       }
       status.hidden = false;
+    } catch {
+      status.textContent = 'Connection failed';
+      status.className = 'settings-status error';
+      status.hidden = false;
+    }
+  });
+
+  // Delete account
+  $('#delete-account-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const status = $('#delete-account-status');
+    status.hidden = true;
+
+    if (!confirm('Are you sure you want to delete your account? This cannot be undone.')) return;
+
+    try {
+      const res = await api('/auth/account', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: $('#delete-account-pw').value }),
+      });
+
+      if (res.ok) {
+        sessionStorage.removeItem('ppvda_view');
+        logout();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        status.textContent = data.error || 'Failed to delete account';
+        status.className = 'settings-status error';
+        status.hidden = false;
+      }
     } catch {
       status.textContent = 'Connection failed';
       status.className = 'settings-status error';
@@ -619,6 +679,7 @@
     resultsSection.hidden = true;
     settingsSection.hidden = true;
     adminSection.hidden = false;
+    sessionStorage.setItem('ppvda_view', 'admin');
     await loadUsers();
   });
 
@@ -646,7 +707,7 @@
             ${esc(u.username)}
             ${u.is_admin ? '<span class="admin-badge">Admin</span>' : ''}
           </div>
-          <button class="btn-danger" data-delete-user="${esc(u.id)}" ${u.is_admin ? 'disabled' : ''}>Delete</button>
+          ${u.id === currentUserId ? '<span style="font-size:0.75rem;color:var(--text-muted)">You</span>' : '<button class="btn-danger" data-delete-user="' + esc(u.id) + '">Delete</button>'}
         </div>
       `).join('');
 

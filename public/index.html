@@ -74,9 +74,20 @@
         <form id="password-form">
           <input type="password" id="old-password" placeholder="Current password" autocomplete="current-password" required>
           <input type="password" id="new-password" placeholder="New password (16+ chars, letter + number + symbol)" minlength="16" autocomplete="new-password" required>
+          <input type="password" id="confirm-new-password" placeholder="Confirm new password" minlength="16" autocomplete="new-password" required>
           <button type="submit">Change Password</button>
         </form>
         <p id="pw-status" class="settings-status" hidden></p>
+      </div>
+
+      <div class="settings-group">
+        <h3>Delete Account</h3>
+        <p class="settings-desc">This will permanently delete your account and all your encrypted Darkreel credentials. This cannot be undone.</p>
+        <form id="delete-account-form">
+          <input type="password" id="delete-account-pw" placeholder="Enter your password to confirm" autocomplete="current-password" required>
+          <button type="submit" class="btn-danger">Delete My Account</button>
+        </form>
+        <p id="delete-account-status" class="settings-status" hidden></p>
       </div>
     </section>
 
