@@ -1,7 +1,24 @@
 import dotenv from 'dotenv';
-import { randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 
 dotenv.config();
+
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (secret) {
+    if (secret.length < 32) {
+      throw new Error('JWT_SECRET must be at least 32 characters');
+    }
+    return secret;
+  }
+  // Generate a strong ephemeral secret — warn that sessions won't survive restarts
+  console.warn(
+    'WARNING: JWT_SECRET not set — using random secret. Sessions will not survive server restarts.\n' +
+    '  Set JWT_SECRET to a random string of 32+ characters for production use.\n' +
+    '  Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"',
+  );
+  return randomBytes(32).toString('hex');
+}
 
 export interface AppConfig {
   port: number;
@@ -60,7 +77,7 @@ export function loadConfig(): AppConfig {
     blockedHosts: parseHostList(process.env.BLOCKED_HOSTS),
     allowedHosts: parseHostList(process.env.ALLOWED_HOSTS),
     // Auth + DB
-    jwtSecret: process.env.JWT_SECRET || randomUUID(),
+    jwtSecret: getJwtSecret(),
     dbPath: process.env.DB_PATH ?? './data/ppvda.db',
     adminUsername: process.env.PPVDA_ADMIN_USERNAME ?? 'admin',
     adminPassword: process.env.PPVDA_ADMIN_PASSWORD ?? '',
@@ -70,6 +87,6 @@ export function loadConfig(): AppConfig {
     // Jobs
     maxJobHistory: parseInt(process.env.MAX_JOB_HISTORY ?? '100', 10),
     // Features
-    enableThumbnails: process.env.ENABLE_THUMBNAILS === 'true',
+    enableThumbnails: process.env.ENABLE_THUMBNAILS !== 'false',
   });
 }

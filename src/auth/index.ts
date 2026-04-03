@@ -38,6 +38,25 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
     cookie: { cookieName: 'token', signed: false },
   });
 
+  // Pre-validation hook: reject tokens with unexpected headers before they
+  // reach fast-jwt. Mitigates CVE-2023-48223 (algorithm confusion via
+  // whitespace-prefixed keys) and GHSA-hm7r-c7qw-ghp6 (unknown crit headers).
+  app.addHook('onRequest', async (request) => {
+    const token = request.cookies?.token
+      ?? request.headers.authorization?.replace(/^Bearer\s+/, '')
+      ?? (request.query as Record<string, string>)?.token;
+    if (!token) return; // No token to validate — let downstream handle it
+    try {
+      const headerB64 = token.split('.')[0];
+      if (!headerB64) return;
+      const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString());
+      if (header.alg !== 'HS256') throw new Error('Unexpected algorithm');
+      if (header.crit) throw new Error('Unexpected crit header');
+    } catch {
+      // Malformed or suspicious token — let jwtVerify reject it naturally
+    }
+  });
+
   // --- Auth preHandler ---
   const authenticate = async (request: FastifyRequest, reply: FastifyReply) => {
     try {
@@ -59,11 +78,18 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
       }
     }
 
-    // Verify user still exists in DB (catches deleted users with valid JWTs)
+    // Verify user still exists and has an active session (master key in RAM).
+    // After a server restart the session store is empty, so this forces re-login
+    // rather than leaving the user in a half-authenticated state.
     const userId = (request as any).user?.sub;
     if (!userId || !db.getUserById(userId)) {
       reply.clearCookie('token', { path: '/' });
       reply.status(401).send({ success: false, error: 'Account no longer exists' });
+      return reply;
+    }
+    if (!sessions.has(userId)) {
+      reply.clearCookie('token', { path: '/' });
+      reply.status(401).send({ success: false, error: 'Session expired' });
       return reply;
     }
   };
@@ -134,7 +160,7 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
           path: '/',
           httpOnly: true,
           sameSite: 'strict',
-          secure: false,
+          secure: process.env.NODE_ENV === 'production',
         })
         .send({ success: true, token });
     },

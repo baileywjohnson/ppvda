@@ -8,6 +8,7 @@ import { streamDownloadRequestSchema } from '../schemas/stream-download.js';
 import { generateId } from '../../utils/id.js';
 import { ensureDir } from '../../utils/fs.js';
 import type { ProxyConfig } from '../../proxy/types.js';
+import { isPrivateUrl } from '../../utils/url.js';
 
 interface StreamDownloadBody {
   videoUrl: string;
@@ -28,12 +29,15 @@ export async function streamDownloadRoutes(
     '/stream-download',
     {
       schema: { body: streamDownloadRequestSchema },
+      config: {
+        rateLimit: { max: 10, timeWindow: '1 minute' },
+      },
       ...(opts.preHandler ? { preHandler: opts.preHandler } : {}),
     },
     async (request, reply) => {
       const { videoUrl, filename } = request.body;
 
-      // Validate URL protocol to prevent SSRF
+      // Validate URL protocol and block private/internal targets
       try {
         const parsed = new URL(videoUrl);
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -42,6 +46,11 @@ export async function streamDownloadRoutes(
         }
       } catch {
         reply.status(400).send({ success: false, error: 'Invalid URL' });
+        return;
+      }
+
+      if (await isPrivateUrl(videoUrl)) {
+        reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
         return;
       }
 

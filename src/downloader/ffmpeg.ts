@@ -32,8 +32,12 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
     outputPath,
   ];
 
-  // Build environment with proxy vars if configured
-  const env: Record<string, string> = { ...process.env as Record<string, string> };
+  // Build minimal environment — don't leak secrets to subprocess
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? '',
+    HOME: process.env.HOME ?? '',
+    TMPDIR: process.env.TMPDIR ?? '',
+  };
   if (proxyConfig) {
     Object.assign(env, getFfmpegEnv(proxyConfig));
   }
@@ -116,7 +120,11 @@ export function spawnFfmpegStream(options: FfmpegStreamOptions): {
     'pipe:1',
   ];
 
-  const env: Record<string, string> = { ...process.env as Record<string, string> };
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? '',
+    HOME: process.env.HOME ?? '',
+    TMPDIR: process.env.TMPDIR ?? '',
+  };
   if (proxyConfig) {
     Object.assign(env, getFfmpegEnv(proxyConfig));
   }

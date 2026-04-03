@@ -6,6 +6,7 @@ import { ExtractionError } from '../../utils/errors.js';
 import { downloadRequestSchema, downloadResponseSchema } from '../schemas/download.js';
 import type { ProxyConfig } from '../../proxy/types.js';
 import type { VideoType } from '../../extractor/types.js';
+import { isPrivateUrl } from '../../utils/url.js';
 
 interface DownloadBody {
   url?: string;
@@ -40,6 +41,12 @@ export async function downloadRoutes(
     },
     async (request, reply) => {
       const { url, videoUrl, filename, timeout } = request.body;
+
+      // Block private/internal URLs
+      const urlToCheck = videoUrl ?? url;
+      if (urlToCheck && await isPrivateUrl(urlToCheck)) {
+        throw new ExtractionError('Private/internal URLs are not allowed', 'PRIVATE_URL_BLOCKED');
+      }
 
       let targetUrl: string;
       let targetType: VideoType;

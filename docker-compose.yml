@@ -16,7 +16,7 @@ services:
       # Database
       - DB_PATH=/app/data/ppvda.db
       # Features
-      - ENABLE_THUMBNAILS=${ENABLE_THUMBNAILS:-false}
+      - ENABLE_THUMBNAILS=${ENABLE_THUMBNAILS:-true}
       - MAX_CONCURRENT_DOWNLOADS=${MAX_CONCURRENT_DOWNLOADS:-3}
     volumes:
       - ./downloads:/app/downloads

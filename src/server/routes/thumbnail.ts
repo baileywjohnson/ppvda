@@ -1,6 +1,7 @@
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { spawnFfmpegStream } from '../../downloader/ffmpeg.js';
 import type { ProxyConfig } from '../../proxy/types.js';
+import { isPrivateUrl } from '../../utils/url.js';
 
 export async function thumbnailRoutes(
   app: FastifyInstance,
@@ -29,7 +30,7 @@ export async function thumbnailRoutes(
       const { videoUrl, t } = request.query;
       const seekTime = t ?? '2';
 
-      // Validate URL protocol to prevent SSRF
+      // Validate URL protocol and block private/internal targets
       try {
         const parsed = new URL(videoUrl);
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -38,6 +39,11 @@ export async function thumbnailRoutes(
         }
       } catch {
         reply.status(400).send({ success: false, error: 'Invalid URL' });
+        return;
+      }
+
+      if (await isPrivateUrl(videoUrl)) {
+        reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
         return;
       }
 

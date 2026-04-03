@@ -3,6 +3,7 @@ import { extractVideos, extractVideosStreaming } from '../../extractor/index.js'
 import { extractRequestSchema, extractResponseSchema } from '../schemas/extract.js';
 import { probeVideo, qualityFromResolution } from '../../downloader/probe.js';
 import type { ProxyConfig } from '../../proxy/types.js';
+import { isPrivateUrl } from '../../utils/url.js';
 
 interface ExtractBody {
   url: string;
@@ -20,10 +21,18 @@ export async function extractRoutes(
         body: extractRequestSchema,
         response: { 200: extractResponseSchema },
       },
+      config: {
+        rateLimit: { max: 10, timeWindow: '1 minute' },
+      },
       ...(opts.preHandler ? { preHandler: opts.preHandler } : {}),
     },
     async (request, reply) => {
       const { url, timeout } = request.body;
+
+      if (await isPrivateUrl(url)) {
+        reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
+        return;
+      }
 
       const result = await extractVideos({
         url,
@@ -44,10 +53,19 @@ export async function extractRoutes(
     '/extract/stream',
     {
       schema: { body: extractRequestSchema },
+      config: {
+        rateLimit: { max: 10, timeWindow: '1 minute' },
+      },
       ...(opts.preHandler ? { preHandler: opts.preHandler } : {}),
     },
     async (request, reply) => {
       const { url, timeout } = request.body;
+
+      if (await isPrivateUrl(url)) {
+        reply.raw.writeHead(400, { 'Content-Type': 'application/json' });
+        reply.raw.end(JSON.stringify({ success: false, error: 'Private/internal URLs are not allowed' }));
+        return;
+      }
 
       reply.hijack();
       reply.raw.writeHead(200, {
