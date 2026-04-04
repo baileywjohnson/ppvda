@@ -35,7 +35,11 @@ export async function probeVideo(options: {
     url,
   ];
 
-  const env: Record<string, string> = { ...process.env as Record<string, string> };
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? '',
+    HOME: process.env.HOME ?? '',
+    TMPDIR: process.env.TMPDIR ?? '',
+  };
   if (proxyConfig) {
     Object.assign(env, getFfmpegEnv(proxyConfig));
   }
