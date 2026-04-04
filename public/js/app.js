@@ -786,11 +786,11 @@
     settingsSection.hidden = true;
     adminSection.hidden = false;
     sessionStorage.setItem('ppvda_view', 'admin');
-    await loadUsers();
+    const tasks = [loadUsers()];
     if (vpnAvailable) {
-      await loadVpnRelays();
-      await loadVpnPermissions();
+      tasks.push(loadVpnRelays(), loadVpnPermissions());
     }
+    await Promise.all(tasks);
   });
 
   adminBackBtn.addEventListener('click', () => {
