@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import fastifyJwt from '@fastify/jwt';
 import fastifyCookie from '@fastify/cookie';
+import { SignJWT, jwtVerify, errors as joseErrors } from 'jose';
 import type { DB } from '../db/index.js';
 import type { SessionStore } from './sessions.js';
 import {
@@ -22,66 +22,71 @@ export interface UserContext {
   isAdmin: boolean;
 }
 
-declare module '@fastify/jwt' {
-  interface FastifyJWT {
-    payload: { sub: string; isAdmin: boolean };
-    user: { sub: string; isAdmin: boolean };
-  }
+interface JWTPayload {
+  sub: string;
+  isAdmin: boolean;
 }
 
 export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
   const { db, sessions } = opts;
+  const secret = new TextEncoder().encode(opts.jwtSecret);
 
   await app.register(fastifyCookie);
-  await app.register(fastifyJwt, {
-    secret: opts.jwtSecret,
-    cookie: { cookieName: 'token', signed: false },
-  });
 
-  // Pre-validation hook: reject tokens with unexpected headers before they
-  // reach fast-jwt. Mitigates CVE-2023-48223 (algorithm confusion via
-  // whitespace-prefixed keys) and GHSA-hm7r-c7qw-ghp6 (unknown crit headers).
-  app.addHook('onRequest', async (request) => {
-    const token = request.cookies?.token
-      ?? request.headers.authorization?.replace(/^Bearer\s+/, '')
-      ?? (request.query as Record<string, string>)?.token;
-    if (!token) return; // No token to validate — let downstream handle it
-    try {
-      const headerB64 = token.split('.')[0];
-      if (!headerB64) return;
-      const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString());
-      if (header.alg !== 'HS256') throw new Error('Unexpected algorithm');
-      if (header.crit) throw new Error('Unexpected crit header');
-    } catch {
-      // Malformed or suspicious token — let jwtVerify reject it naturally
-    }
-  });
+  // --- JWT helpers ---
+  async function signToken(payload: JWTPayload): Promise<string> {
+    return new SignJWT({ isAdmin: payload.isAdmin })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setSubject(payload.sub)
+      .setIssuedAt()
+      .setExpirationTime('24h')
+      .sign(secret);
+  }
+
+  async function verifyToken(token: string): Promise<JWTPayload> {
+    const { payload } = await jwtVerify(token, secret, {
+      algorithms: ['HS256'],
+    });
+    return { sub: payload.sub as string, isAdmin: !!payload.isAdmin };
+  }
+
+  // --- Extract token from request ---
+  function extractToken(request: FastifyRequest): string | undefined {
+    // Cookie first
+    const cookieToken = request.cookies?.token;
+    if (cookieToken) return cookieToken;
+
+    // Authorization header
+    const auth = request.headers.authorization;
+    if (auth?.startsWith('Bearer ')) return auth.slice(7);
+
+    // Query param fallback (SSE/EventSource)
+    return (request.query as Record<string, string>)?.token;
+  }
 
   // --- Auth preHandler ---
   const authenticate = async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      await request.jwtVerify();
-    } catch {
-      // Fallback: query param for SSE/EventSource
-      const queryToken = (request.query as Record<string, string>)?.token;
-      if (queryToken) {
-        try {
-          const payload = app.jwt.verify<{ sub: string; isAdmin: boolean }>(queryToken);
-          (request as any).user = payload;
-        } catch {
-          reply.status(401).send({ success: false, error: 'Unauthorized' });
-          return;
-        }
-      } else {
-        reply.status(401).send({ success: false, error: 'Unauthorized' });
-        return;
-      }
+    const token = extractToken(request);
+    if (!token) {
+      reply.status(401).send({ success: false, error: 'Unauthorized' });
+      return reply;
     }
+
+    let payload: JWTPayload;
+    try {
+      payload = await verifyToken(token);
+    } catch {
+      reply.clearCookie('token', { path: '/' });
+      reply.status(401).send({ success: false, error: 'Unauthorized' });
+      return reply;
+    }
+
+    (request as any).user = payload;
 
     // Verify user still exists and has an active session (master key in RAM).
     // After a server restart the session store is empty, so this forces re-login
     // rather than leaving the user in a half-authenticated state.
-    const userId = (request as any).user?.sub;
+    const userId = payload.sub;
     if (!userId || !db.getUserById(userId)) {
       reply.clearCookie('token', { path: '/' });
       reply.status(401).send({ success: false, error: 'Account no longer exists' });
@@ -150,10 +155,7 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
       sessions.set(user.id, masterKey);
       zeroBuffer(masterKey);
 
-      const token = app.jwt.sign(
-        { sub: user.id, isAdmin: !!user.is_admin },
-        { expiresIn: '24h' },
-      );
+      const token = await signToken({ sub: user.id, isAdmin: !!user.is_admin });
 
       reply
         .setCookie('token', token, {
