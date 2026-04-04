@@ -124,6 +124,21 @@
         <p id="create-user-status" class="settings-status" hidden></p>
       </div>
 
+      <div class="settings-group" id="vpn-perms-section" hidden>
+        <h3>VPN Policy</h3>
+        <p class="settings-desc">Control the server-wide VPN default and which users can override it.</p>
+        <label class="settings-label">Default for all users:</label>
+        <div class="vpn-selector">
+          <select id="vpn-default-select">
+            <option value="on">VPN On</option>
+            <option value="off">VPN Off</option>
+          </select>
+          <button type="button" id="vpn-default-save-btn">Save</button>
+        </div>
+        <p id="vpn-default-status" class="settings-status" hidden></p>
+        <div id="vpn-user-toggle-list" style="margin-top:0.75rem"></div>
+      </div>
+
       <div class="settings-group" id="vpn-admin-section" hidden>
         <h3>VPN Country</h3>
         <p class="settings-desc">Switch the server-wide VPN exit location. This affects all users.</p>

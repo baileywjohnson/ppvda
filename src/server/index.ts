@@ -9,6 +9,7 @@ import type { DB } from '../db/index.js';
 import type { SessionStore } from '../auth/sessions.js';
 import { parseProxyUrl, type ProxyConfig } from '../proxy/index.js';
 import { getVpnStatus, getRelays, switchMullvadCountry, isVpnSwitching } from '../mullvad/index.js';
+import { VpnPermissionStore } from './vpn-permissions.js';
 import { AppError } from '../utils/errors.js';
 import { setupAuth } from '../auth/index.js';
 import { JobStore } from '../jobs/store.js';
@@ -31,6 +32,8 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
     },
     disableRequestLogging: true,
   });
+
+  const vpnPermissions = new VpnPermissionStore();
 
   await app.register(cors, { origin: false });
 
@@ -84,6 +87,7 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
 
   const routeOpts = {
     proxyConfig,
+    vpnPermissions,
     downloadDir: config.downloadDir,
     ffmpegPath: config.ffmpegPath,
     defaultTimeoutMs: config.browserTimeoutMs,
@@ -109,18 +113,25 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
     const isAdmin = (request as any).user.isAdmin;
     const vpn = getVpnStatus();
     const hasProxy = !!proxyConfig || vpn.configured;
+    const canToggle = isAdmin || vpnPermissions.canToggle(userId);
     return {
       enableThumbnails: config.enableThumbnails,
       darkreelConfigured: db.hasDarkreelCreds(userId),
       isAdmin,
       userId,
-      vpn: { available: hasProxy, mullvad: vpn.configured, location: vpn.location },
+      vpn: {
+        available: hasProxy,
+        mullvad: vpn.configured,
+        location: vpn.location,
+        default: vpnPermissions.getDefault(),
+        canToggle,
+      },
     };
   });
 
   // Register routes
   await app.register(healthRoutes);
-  await app.register(adminRoutes, { db, sessions, preHandler: authenticate, requireAdmin, vpnBypassHosts: config.vpnBypassHosts });
+  await app.register(adminRoutes, { db, sessions, preHandler: authenticate, requireAdmin, vpnBypassHosts: config.vpnBypassHosts, vpnPermissions });
   await app.register(settingsRoutes, { db, sessions, preHandler: authenticate });
   await app.register(jobRoutes, { store: jobStore, pipeline, preHandler: authenticate });
   await app.register(extractRoutes, { ...routeOpts, preHandler: authenticate });

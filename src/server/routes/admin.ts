@@ -4,7 +4,7 @@ import type { SessionStore } from '../../auth/sessions.js';
 import { createUser } from '../../auth/index.js';
 import { isStrongPassword, PASSWORD_REQUIREMENTS } from '../../crypto/index.js';
 import { getRelays, switchMullvadCountry, getVpnStatus } from '../../mullvad/index.js';
-import type { AppConfig } from '../../config.js';
+import type { VpnPermissionStore } from '../vpn-permissions.js';
 
 interface AdminRouteOpts {
   db: DB;
@@ -12,6 +12,7 @@ interface AdminRouteOpts {
   preHandler: preHandlerHookHandler;
   requireAdmin: preHandlerHookHandler;
   vpnBypassHosts?: string[];
+  vpnPermissions: VpnPermissionStore;
 }
 
 export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
@@ -85,8 +86,9 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
         return;
       }
 
-      // Clear their session
+      // Clear their session and VPN permissions
       sessions.delete(id);
+      opts.vpnPermissions.removeUser(id);
 
       if (!db.deleteUser(id)) {
         reply.status(404).send({ success: false, error: 'User not found' });
@@ -152,6 +154,77 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
         const msg = err instanceof Error ? err.message : 'Country switch failed';
         reply.status(400).send({ success: false, error: msg });
       }
+    },
+  );
+
+  // --- VPN Permissions (admin only, in-memory) ---
+
+  // Get current VPN policy
+  app.get(
+    '/admin/vpn/permissions',
+    { preHandler: [opts.preHandler, opts.requireAdmin] },
+    async () => {
+      return {
+        success: true,
+        data: {
+          vpnDefault: opts.vpnPermissions.getDefault(),
+          toggleUserIds: opts.vpnPermissions.listToggleUserIds(),
+        },
+      };
+    },
+  );
+
+  // Set server-wide VPN default
+  app.put<{ Body: { vpnDefault: 'on' | 'off' } }>(
+    '/admin/vpn/default',
+    {
+      preHandler: [opts.preHandler, opts.requireAdmin],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['vpnDefault'],
+          properties: {
+            vpnDefault: { type: 'string', enum: ['on', 'off'] },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request) => {
+      opts.vpnPermissions.setDefault(request.body.vpnDefault);
+      return { success: true, data: { vpnDefault: request.body.vpnDefault } };
+    },
+  );
+
+  // Grant or revoke VPN toggle permission for a user
+  app.put<{ Body: { userId: string; allowed: boolean } }>(
+    '/admin/vpn/user-toggle',
+    {
+      preHandler: [opts.preHandler, opts.requireAdmin],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['userId', 'allowed'],
+          properties: {
+            userId: { type: 'string', minLength: 1 },
+            allowed: { type: 'boolean' },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { userId, allowed } = request.body;
+      if (!db.getUserById(userId)) {
+        reply.status(404).send({ success: false, error: 'User not found' });
+        return;
+      }
+      if (allowed) {
+        opts.vpnPermissions.grantToggle(userId);
+      } else {
+        opts.vpnPermissions.revokeToggle(userId);
+      }
+      return { success: true };
     },
   );
 }

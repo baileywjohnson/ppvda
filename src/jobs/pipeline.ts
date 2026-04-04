@@ -9,6 +9,7 @@ import { downloadVideo, selectBestVideo } from '../downloader/index.js';
 import { classifyUrl } from '../extractor/patterns.js';
 import { uploadToDarkreel } from '../hooks/darkreel.js';
 import { isVpnSwitching } from '../mullvad/index.js';
+import { resolveProxy, type VpnPermissionStore } from '../server/vpn-permissions.js';
 import { getUserDarkreelCreds } from '../server/routes/settings.js';
 import type { VideoType, MediaType } from '../extractor/types.js';
 
@@ -25,6 +26,7 @@ export interface PipelineOpts {
   maxConcurrentDownloads: number;
   drkBinaryPath: string;
   drkUploadTimeoutMs: number;
+  vpnPermissions: VpnPermissionStore;
 }
 
 export interface Pipeline {
@@ -94,7 +96,9 @@ async function processJob(
   sessions: SessionStore,
   logger: FastifyBaseLogger,
 ) {
-  const proxy = input.useVpn === false ? undefined : opts.proxyConfig;
+  const dbUser = db.getUserById(userId);
+  const isAdmin = !!dbUser?.is_admin;
+  const proxy = resolveProxy(input.useVpn, userId, isAdmin, opts.vpnPermissions, opts.proxyConfig);
 
   if (proxy && isVpnSwitching()) {
     store.update(jobId, { status: 'failed', error: 'VPN is switching countries, try again in a moment' });
@@ -105,9 +109,9 @@ async function processJob(
 
   // Step 1: Extract (if needed)
   if (input.videoUrl) {
-    const match = classifyUrl(input.videoUrl);
+    const match = classifyUrl(input.videoUrl, undefined, { includeImages: true });
     if (!match) {
-      store.update(jobId, { status: 'failed', error: 'Could not determine video type' });
+      store.update(jobId, { status: 'failed', error: 'Could not determine media type' });
       return;
     }
     targetUrl = input.videoUrl;

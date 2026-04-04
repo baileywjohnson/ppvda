@@ -5,6 +5,7 @@ import { probeVideo, qualityFromResolution } from '../../downloader/probe.js';
 import type { ProxyConfig } from '../../proxy/types.js';
 import { isPrivateUrl } from '../../utils/url.js';
 import { isVpnSwitching } from '../../mullvad/index.js';
+import { resolveProxy, type VpnPermissionStore } from '../vpn-permissions.js';
 
 interface ExtractBody {
   url: string;
@@ -15,7 +16,7 @@ interface ExtractBody {
 
 export async function extractRoutes(
   app: FastifyInstance,
-  opts: { proxyConfig?: ProxyConfig; ffmpegPath: string; defaultTimeoutMs: number; defaultNetworkIdleMs: number; preferredHosts: string[]; blockedHosts: string[]; allowedHosts: string[]; preHandler?: preHandlerHookHandler },
+  opts: { proxyConfig?: ProxyConfig; vpnPermissions: VpnPermissionStore; ffmpegPath: string; defaultTimeoutMs: number; defaultNetworkIdleMs: number; preferredHosts: string[]; blockedHosts: string[]; allowedHosts: string[]; preHandler?: preHandlerHookHandler },
 ) {
   app.post<{ Body: ExtractBody }>(
     '/extract',
@@ -31,7 +32,8 @@ export async function extractRoutes(
     },
     async (request, reply) => {
       const { url, timeout, useVpn, includeImages } = request.body;
-      const proxy = useVpn === false ? undefined : opts.proxyConfig;
+      const user = (request as any).user;
+      const proxy = resolveProxy(useVpn, user.sub, user.isAdmin, opts.vpnPermissions, opts.proxyConfig);
 
       if (proxy && isVpnSwitching()) {
         reply.status(503).send({ success: false, error: 'VPN is switching countries, try again in a moment' });
@@ -70,7 +72,8 @@ export async function extractRoutes(
     },
     async (request, reply) => {
       const { url, timeout, useVpn, includeImages } = request.body;
-      const proxy = useVpn === false ? undefined : opts.proxyConfig;
+      const user = (request as any).user;
+      const proxy = resolveProxy(useVpn, user.sub, user.isAdmin, opts.vpnPermissions, opts.proxyConfig);
 
       if (proxy && isVpnSwitching()) {
         reply.status(503).send({ success: false, error: 'VPN is switching countries, try again in a moment' });

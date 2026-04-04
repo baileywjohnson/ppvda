@@ -36,6 +36,8 @@
   let currentUserId = null;
   let vpnAvailable = false;
   let vpnLocation = null;
+  let vpnDefault = 'on';
+  let vpnCanToggle = false;
 
   // Extraction results (in-memory only, never persisted)
   let extractionResult = null;
@@ -125,7 +127,7 @@
     showResultsStreaming();
 
     try {
-      const useVpn = vpnAvailable ? $('#use-vpn').checked : undefined;
+      const useVpn = (vpnAvailable && vpnCanToggle) ? $('#use-vpn').checked : undefined;
       const includeImages = $('#include-images')?.checked || false;
       const res = await api('/extract/stream', {
         method: 'POST',
@@ -396,7 +398,7 @@
     btn.textContent = 'Downloading...';
 
     try {
-      const useVpn = vpnAvailable ? $('#use-vpn').checked : undefined;
+      const useVpn = (vpnAvailable && vpnCanToggle) ? $('#use-vpn').checked : undefined;
       const isImage = video.mediaKind === 'image';
       const ext = video.fileExtension || (isImage ? '.jpg' : '.mp4');
       const defaultName = (isImage ? 'image' : 'video') + ext;
@@ -442,7 +444,7 @@
     btn.innerHTML = '<span class="spinner-mini"></span> Sending...';
 
     try {
-      const useVpn = vpnAvailable ? $('#use-vpn').checked : undefined;
+      const useVpn = (vpnAvailable && vpnCanToggle) ? $('#use-vpn').checked : undefined;
       const res = await api('/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -489,13 +491,16 @@
         currentUserId = data.userId ?? null;
         vpnAvailable = data.vpn?.available ?? false;
         vpnLocation = data.vpn?.location ?? null;
+        vpnDefault = data.vpn?.default ?? 'on';
+        vpnCanToggle = data.vpn?.canToggle ?? false;
         // Show/hide admin button
         adminBtn.hidden = !isAdmin;
-        // Show/hide VPN toggle
+        // Show/hide VPN toggle — only if VPN is available AND user can toggle
         const vpnToggle = $('#vpn-toggle');
-        vpnToggle.hidden = !vpnAvailable;
-        if (vpnAvailable && vpnLocation) {
-          $('#vpn-location').textContent = vpnLocation.toUpperCase();
+        vpnToggle.hidden = !vpnAvailable || !vpnCanToggle;
+        if (vpnAvailable) {
+          $('#use-vpn').checked = vpnDefault === 'on';
+          if (vpnLocation) $('#vpn-location').textContent = vpnLocation.toUpperCase();
         }
       }
     } catch { /* defaults are fine */ }
@@ -781,7 +786,10 @@
     adminSection.hidden = false;
     sessionStorage.setItem('ppvda_view', 'admin');
     await loadUsers();
-    if (vpnAvailable) await loadVpnRelays();
+    if (vpnAvailable) {
+      await loadVpnRelays();
+      await loadVpnPermissions();
+    }
   });
 
   adminBackBtn.addEventListener('click', () => {
@@ -817,7 +825,7 @@
           if (!confirm('Delete this user?')) return;
           const userId = btn.dataset.deleteUser;
           const res = await api(`/admin/users/${userId}`, { method: 'DELETE' });
-          if (res.ok) await loadUsers();
+          if (res.ok) { await loadUsers(); if (vpnAvailable) await loadVpnPermissions(); }
         });
       });
     } catch {}
@@ -848,6 +856,7 @@
         $('#new-user-pass').value = '';
         $('#new-user-admin').checked = false;
         await loadUsers();
+        if (vpnAvailable) await loadVpnPermissions();
       } else {
         status.textContent = data.error || 'Failed';
         status.className = 'settings-status error';
@@ -859,7 +868,89 @@
       status.hidden = false;
     }
   });
-  // --- Admin VPN ---
+  // --- Admin VPN Permissions ---
+  async function loadVpnPermissions() {
+    const section = $('#vpn-perms-section');
+    try {
+      const [permsRes, usersRes] = await Promise.all([
+        api('/admin/vpn/permissions'),
+        api('/admin/users'),
+      ]);
+      if (!permsRes.ok || !usersRes.ok) { section.hidden = true; return; }
+
+      const permsData = await permsRes.json();
+      const usersData = await usersRes.json();
+      const toggleIds = new Set(permsData.data?.toggleUserIds ?? []);
+      const users = usersData.data ?? [];
+
+      // Set default selector
+      $('#vpn-default-select').value = permsData.data?.vpnDefault ?? 'on';
+
+      // Render per-user toggle list
+      const list = $('#vpn-user-toggle-list');
+      if (users.length === 0) {
+        list.innerHTML = '<p class="empty">No users</p>';
+      } else {
+        list.innerHTML = users.map((u) => {
+          const isMe = u.id === currentUserId;
+          const checked = u.is_admin || toggleIds.has(u.id);
+          const disabled = u.is_admin; // admins always have toggle
+          return `<div class="user-card">
+            <div class="user-card-info">
+              ${esc(u.username)}
+              ${u.is_admin ? '<span class="admin-badge">Admin</span>' : ''}
+            </div>
+            <label class="checkbox-label">
+              <input type="checkbox" data-vpn-user="${esc(u.id)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Can toggle VPN
+            </label>
+          </div>`;
+        }).join('');
+
+        // Attach change handlers
+        list.querySelectorAll('[data-vpn-user]').forEach((cb) => {
+          if (cb.disabled) return;
+          cb.addEventListener('change', async () => {
+            await api('/admin/vpn/user-toggle', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ userId: cb.dataset.vpnUser, allowed: cb.checked }),
+            });
+          });
+        });
+      }
+
+      section.hidden = false;
+    } catch {
+      section.hidden = true;
+    }
+  }
+
+  $('#vpn-default-save-btn').addEventListener('click', async () => {
+    const status = $('#vpn-default-status');
+    const value = $('#vpn-default-select').value;
+    try {
+      const res = await api('/admin/vpn/default', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vpnDefault: value }),
+      });
+      if (res.ok) {
+        vpnDefault = value;
+        status.textContent = `Default set to VPN ${value.toUpperCase()}`;
+        status.className = 'settings-status success';
+      } else {
+        status.textContent = 'Failed to save';
+        status.className = 'settings-status error';
+      }
+      status.hidden = false;
+    } catch {
+      status.textContent = 'Connection failed';
+      status.className = 'settings-status error';
+      status.hidden = false;
+    }
+  });
+
+  // --- Admin VPN Country ---
   async function loadVpnRelays() {
     const section = $('#vpn-admin-section');
     const select = $('#vpn-country-select');

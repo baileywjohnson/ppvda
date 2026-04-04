@@ -8,6 +8,7 @@ import type { ProxyConfig } from '../../proxy/types.js';
 import type { VideoType, MediaType } from '../../extractor/types.js';
 import { isPrivateUrl } from '../../utils/url.js';
 import { isVpnSwitching } from '../../mullvad/index.js';
+import { resolveProxy, type VpnPermissionStore } from '../vpn-permissions.js';
 
 interface DownloadBody {
   url?: string;
@@ -21,6 +22,7 @@ export async function downloadRoutes(
   app: FastifyInstance,
   opts: {
     proxyConfig?: ProxyConfig;
+    vpnPermissions: VpnPermissionStore;
     downloadDir: string;
     ffmpegPath: string;
     defaultTimeoutMs: number;
@@ -43,7 +45,8 @@ export async function downloadRoutes(
     },
     async (request, reply) => {
       const { url, videoUrl, filename, timeout, useVpn } = request.body;
-      const proxy = useVpn === false ? undefined : opts.proxyConfig;
+      const user = (request as any).user;
+      const proxy = resolveProxy(useVpn, user.sub, user.isAdmin, opts.vpnPermissions, opts.proxyConfig);
 
       if (proxy && isVpnSwitching()) {
         throw new ExtractionError('VPN is switching countries, try again in a moment', 'VPN_SWITCHING');
@@ -60,7 +63,7 @@ export async function downloadRoutes(
 
       if (videoUrl) {
         // Direct video URL provided — skip extraction
-        const match = classifyUrl(videoUrl);
+        const match = classifyUrl(videoUrl, undefined, { includeImages: true });
         if (!match) {
           throw new ExtractionError(
             'Could not determine video type from the provided URL',

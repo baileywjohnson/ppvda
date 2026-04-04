@@ -11,6 +11,7 @@ import type { ProxyConfig } from '../../proxy/types.js';
 import { isPrivateUrl } from '../../utils/url.js';
 import { isVpnSwitching } from '../../mullvad/index.js';
 import { isDirectMediaUrl } from '../../extractor/patterns.js';
+import { resolveProxy, type VpnPermissionStore } from '../vpn-permissions.js';
 import { getHttpAgent } from '../../proxy/index.js';
 
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif', '.bmp', '.tiff']);
@@ -40,6 +41,7 @@ export async function streamDownloadRoutes(
   app: FastifyInstance,
   opts: {
     proxyConfig?: ProxyConfig;
+    vpnPermissions: VpnPermissionStore;
     ffmpegPath: string;
     downloadDir: string;
     downloadTimeoutMs: number;
@@ -57,7 +59,8 @@ export async function streamDownloadRoutes(
     },
     async (request, reply) => {
       const { videoUrl, filename, useVpn } = request.body;
-      const proxy = useVpn === false ? undefined : opts.proxyConfig;
+      const user = (request as any).user;
+      const proxy = resolveProxy(useVpn, user.sub, user.isAdmin, opts.vpnPermissions, opts.proxyConfig);
 
       if (proxy && isVpnSwitching()) {
         reply.status(503).send({ success: false, error: 'VPN is switching countries, try again in a moment' });
