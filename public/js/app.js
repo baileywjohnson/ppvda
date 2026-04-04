@@ -129,10 +129,11 @@
     try {
       const useVpn = (vpnAvailable && vpnCanToggle) ? $('#use-vpn').checked : undefined;
       const includeImages = $('#include-images')?.checked || false;
+      const autoPlay = $('#auto-play')?.checked || false;
       const res = await api('/extract/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, useVpn, includeImages }),
+        body: JSON.stringify({ url, useVpn, includeImages, autoPlay }),
         signal: extractAbort.signal,
       });
 

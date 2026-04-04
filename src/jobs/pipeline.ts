@@ -30,7 +30,7 @@ export interface PipelineOpts {
 }
 
 export interface Pipeline {
-  submit(userId: string, input: { url?: string; videoUrl?: string; filename?: string; timeout?: number; useVpn?: boolean }): Promise<string>;
+  submit(userId: string, input: { url?: string; videoUrl?: string; filename?: string; timeout?: number; useVpn?: boolean; autoPlay?: boolean }): Promise<string>;
 }
 
 /** Simple semaphore for concurrency limiting */
@@ -89,7 +89,7 @@ export function createPipeline(
 async function processJob(
   jobId: string,
   userId: string,
-  input: { url?: string; videoUrl?: string; filename?: string; timeout?: number; useVpn?: boolean },
+  input: { url?: string; videoUrl?: string; filename?: string; timeout?: number; useVpn?: boolean; autoPlay?: boolean },
   store: JobStore,
   opts: PipelineOpts,
   db: DB,
@@ -129,6 +129,7 @@ async function processJob(
         preferredHosts: opts.preferredHosts,
         blockedHosts: opts.blockedHosts,
         allowedHosts: opts.allowedHosts,
+        autoPlay: input.autoPlay,
       });
 
       if (extraction.videos.length === 0) {

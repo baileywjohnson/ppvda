@@ -12,6 +12,7 @@ interface ExtractBody {
   timeout?: number;
   useVpn?: boolean;
   includeImages?: boolean;
+  autoPlay?: boolean;
 }
 
 export async function extractRoutes(
@@ -31,7 +32,7 @@ export async function extractRoutes(
       ...(opts.preHandler ? { preHandler: opts.preHandler } : {}),
     },
     async (request, reply) => {
-      const { url, timeout, useVpn, includeImages } = request.body;
+      const { url, timeout, useVpn, includeImages, autoPlay } = request.body;
       const user = (request as any).user;
       const proxy = resolveProxy(useVpn, user.sub, user.isAdmin, opts.vpnPermissions, opts.proxyConfig);
 
@@ -54,6 +55,7 @@ export async function extractRoutes(
         blockedHosts: opts.blockedHosts,
         allowedHosts: opts.allowedHosts,
         includeImages,
+        autoPlay,
       });
 
       return { success: true, data: result };
@@ -71,7 +73,7 @@ export async function extractRoutes(
       ...(opts.preHandler ? { preHandler: opts.preHandler } : {}),
     },
     async (request, reply) => {
-      const { url, timeout, useVpn, includeImages } = request.body;
+      const { url, timeout, useVpn, includeImages, autoPlay } = request.body;
       const user = (request as any).user;
       const proxy = resolveProxy(useVpn, user.sub, user.isAdmin, opts.vpnPermissions, opts.proxyConfig);
 
@@ -114,6 +116,7 @@ export async function extractRoutes(
         blockedHosts: opts.blockedHosts,
         allowedHosts: opts.allowedHosts,
         includeImages,
+        autoPlay,
         onVideo: (video) => {
           const idx = videoIndex++;
           write('video', { ...video, _idx: idx });

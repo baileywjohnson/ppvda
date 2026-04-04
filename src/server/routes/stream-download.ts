@@ -114,6 +114,9 @@ async function handleImageDownload(
   try {
     const fetchOpts: RequestInit & { dispatcher?: any } = {
       signal: AbortSignal.timeout(timeoutMs),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      },
     };
     // Use proxy agent if configured
     if (proxy) {

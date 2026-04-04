@@ -13,7 +13,7 @@ export async function jobRoutes(app: FastifyInstance, opts: JobsRouteOpts) {
   const { store, pipeline, preHandler } = opts;
 
   // Submit a new job
-  app.post<{ Body: { url?: string; videoUrl?: string; filename?: string; timeout?: number } }>(
+  app.post<{ Body: { url?: string; videoUrl?: string; filename?: string; timeout?: number; autoPlay?: boolean } }>(
     '/jobs',
     {
       schema: { body: createJobRequestSchema, response: { 202: jobResponseSchema } },

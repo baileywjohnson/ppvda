@@ -1,12 +1,59 @@
-import { chromium, type Browser } from 'playwright';
+import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { interceptNetworkRequests } from './network-interceptor.js';
 import { scanDomForVideos } from './dom-scanner.js';
+import { autoClickPlay } from './auto-play.js';
 import { ExtractionError } from '../utils/errors.js';
 import type { ProxyConfig } from '../proxy/types.js';
 import { getPlaywrightProxy } from '../proxy/index.js';
 import type { ExtractionResult, ExtractOptions, VideoSource } from './types.js';
 
 export type { ExtractionResult, ExtractOptions, VideoSource } from './types.js';
+
+const USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+/**
+ * Script injected before any page JS runs to mask headless/automation signals.
+ */
+const STEALTH_SCRIPT = `
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+  Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+      const arr = [
+        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+      ];
+      arr.item = (i) => arr[i] || null;
+      arr.namedItem = (n) => arr.find(p => p.name === n) || null;
+      arr.refresh = () => {};
+      return arr;
+    },
+  });
+
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+  Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+  Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+
+  // Chrome runtime stub
+  if (!window.chrome) {
+    window.chrome = {};
+  }
+  if (!window.chrome.runtime) {
+    window.chrome.runtime = { connect: () => {}, sendMessage: () => {} };
+  }
+
+  // Permissions API — resolve 'notifications' as 'denied' like a real browser
+  const origQuery = Permissions.prototype.query;
+  Permissions.prototype.query = function(params) {
+    if (params.name === 'notifications') {
+      return Promise.resolve({ state: 'denied', onchange: null });
+    }
+    return origQuery.call(this, params);
+  };
+`;
 
 let browserInstance: Browser | null = null;
 let currentProxyRaw: string | undefined;
@@ -21,12 +68,28 @@ async function getBrowser(proxy?: ProxyConfig): Promise<Browser> {
   if (!browserInstance) {
     browserInstance = await chromium.launch({
       headless: true,
+      args: [
+        '--disable-blink-features=AutomationControlled',
+      ],
       ...(proxy ? { proxy: getPlaywrightProxy(proxy) } : {}),
     });
     currentProxyRaw = proxy?.raw;
   }
 
   return browserInstance;
+}
+
+async function createStealthContext(browser: Browser): Promise<BrowserContext> {
+  const context = await browser.newContext({
+    userAgent: USER_AGENT,
+    viewport: { width: 1920, height: 1080 },
+    locale: 'en-US',
+    timezoneId: 'America/New_York',
+  });
+
+  await context.addInitScript(STEALTH_SCRIPT);
+
+  return context;
 }
 
 export async function closeBrowser(): Promise<void> {
@@ -44,7 +107,7 @@ export async function extractVideos(
   const startTime = Date.now();
 
   const browser = await getBrowser(options.proxy);
-  const context = await browser.newContext();
+  const context = await createStealthContext(browser);
   const page = await context.newPage();
 
   try {
@@ -67,6 +130,11 @@ export async function extractVideos(
         'Failed to load page',
         'PAGE_LOAD_FAILED',
       );
+    }
+
+    // Try clicking play buttons to trigger video loading
+    if (options.autoPlay) {
+      await autoClickPlay(page);
     }
 
     // Wait for network to settle (interceptor resolves on idle or timeout)
@@ -123,7 +191,7 @@ export async function extractVideosStreaming(
   const startTime = Date.now();
 
   const browser = await getBrowser(options.proxy);
-  const context = await browser.newContext();
+  const context = await createStealthContext(browser);
   const page = await context.newPage();
 
   // Track all emitted URLs to deduplicate across network + DOM
@@ -161,6 +229,11 @@ export async function extractVideosStreaming(
       interceptor.stop();
       options.onError(new ExtractionError('Failed to load page', 'PAGE_LOAD_FAILED'));
       return;
+    }
+
+    // Try clicking play buttons to trigger video loading
+    if (options.autoPlay) {
+      await autoClickPlay(page);
     }
 
     // Run DOM scan and network idle in parallel

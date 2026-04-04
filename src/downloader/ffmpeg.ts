@@ -26,6 +26,7 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
 
   const args = [
     '-y',                    // overwrite output
+    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     '-i', inputUrl,          // input URL
     '-c', 'copy',            // copy codecs (no re-encoding)
     '-movflags', '+faststart', // optimize for streaming
@@ -113,6 +114,7 @@ export function spawnFfmpegStream(options: FfmpegStreamOptions): {
 
   const args = options.args ?? [
     '-y',
+    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     '-i', inputUrl,
     '-c', 'copy',
     '-movflags', 'frag_keyframe+empty_moov',

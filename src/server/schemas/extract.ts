@@ -6,6 +6,7 @@ export const extractRequestSchema = {
     timeout: { type: 'number', minimum: 1000, maximum: 120000 },
     useVpn: { type: 'boolean' },
     includeImages: { type: 'boolean' },
+    autoPlay: { type: 'boolean' },
   },
   additionalProperties: false,
 } as const;

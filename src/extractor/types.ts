@@ -28,4 +28,5 @@ export interface ExtractOptions {
   blockedHosts?: string[];
   allowedHosts?: string[];
   includeImages?: boolean;
+  autoPlay?: boolean;
 }

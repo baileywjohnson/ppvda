@@ -6,6 +6,7 @@ export const createJobRequestSchema = {
     filename: { type: 'string', maxLength: 200 },
     timeout: { type: 'number' },
     useVpn: { type: 'boolean' },
+    autoPlay: { type: 'boolean' },
   },
   anyOf: [
     { required: ['url'] },

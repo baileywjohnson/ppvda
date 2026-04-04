@@ -26,12 +26,30 @@ export async function downloadDirect(options: DirectDownloadOptions): Promise<vo
     maxRedirects = 5,
   } = options;
 
-  await downloadWithRedirects(url, outputPath, {
-    proxyConfig,
-    timeoutMs,
-    maxRedirects,
-    redirectCount: 0,
-  });
+  const maxRetries = 3;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      await downloadWithRedirects(url, outputPath, {
+        proxyConfig,
+        timeoutMs,
+        maxRedirects,
+        redirectCount: 0,
+      });
+      return;
+    } catch (err) {
+      if (
+        err instanceof DownloadError &&
+        err.message.startsWith('HTTP 429') &&
+        attempt < maxRetries
+      ) {
+        const waitSec = (err as any).retryAfter ?? (2 ** attempt * 2);
+        await new Promise((r) => setTimeout(r, waitSec * 1000));
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 interface InternalOptions {
@@ -62,7 +80,11 @@ async function downloadWithRedirects(
       reject(new TimeoutError(`Download timed out after ${opts.timeoutMs}ms`));
     }, opts.timeoutMs);
 
-    const req = mod.get(url, { agent }, (res) => {
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    };
+
+    const req = mod.get(url, { agent, headers }, (res) => {
       // Handle redirects
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         clearTimeout(timeout);
@@ -77,10 +99,15 @@ async function downloadWithRedirects(
 
       if (!res.statusCode || res.statusCode >= 400) {
         clearTimeout(timeout);
-        reject(new DownloadError(
+        const err = new DownloadError(
           `HTTP ${res.statusCode}`,
           'HTTP_ERROR',
-        ));
+        );
+        if (res.statusCode === 429 && res.headers['retry-after']) {
+          const parsed = parseInt(res.headers['retry-after'] as string, 10);
+          if (!isNaN(parsed)) (err as any).retryAfter = parsed;
+        }
+        reject(err);
         return;
       }
 
