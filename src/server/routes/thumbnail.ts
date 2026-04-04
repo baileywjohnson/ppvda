@@ -2,6 +2,18 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { spawnFfmpegStream } from '../../downloader/ffmpeg.js';
 import type { ProxyConfig } from '../../proxy/types.js';
 import { isPrivateUrl } from '../../utils/url.js';
+import { getHttpAgent } from '../../proxy/index.js';
+
+const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif', '.bmp', '.tiff']);
+
+function getExtFromUrl(url: string): string {
+  try {
+    const pathname = new URL(url).pathname;
+    const dot = pathname.lastIndexOf('.');
+    if (dot !== -1) return pathname.substring(dot).toLowerCase();
+  } catch {}
+  return '';
+}
 
 export async function thumbnailRoutes(
   app: FastifyInstance,
@@ -28,7 +40,6 @@ export async function thumbnailRoutes(
     },
     async (request, reply) => {
       const { videoUrl, t } = request.query;
-      const seekTime = t ?? '2';
 
       // Validate URL protocol and block private/internal targets
       try {
@@ -47,49 +58,106 @@ export async function thumbnailRoutes(
         return;
       }
 
-      const { proc, stdout, kill } = spawnFfmpegStream({
-        inputUrl: videoUrl,
-        ffmpegPath: opts.ffmpegPath,
-        proxyConfig: opts.proxyConfig,
-        timeoutMs: 15000,
-        args: [
-          '-y',
-          '-i', videoUrl,
-          '-ss', seekTime,
-          '-frames:v', '1',
-          '-vf', 'scale=320:-1',
-          '-f', 'image2pipe',
-          '-vcodec', 'mjpeg',
-          'pipe:1',
-        ],
-      });
+      const ext = getExtFromUrl(videoUrl);
 
-      // Collect JPEG data (single frame, small)
-      const chunks: Buffer[] = [];
-      stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-
-      const result = await new Promise<Buffer | null>((resolve) => {
-        proc.on('close', (code) => {
-          if (code === 0 && chunks.length > 0) {
-            resolve(Buffer.concat(chunks));
-          } else {
-            resolve(null);
-          }
-        });
-        proc.on('error', () => resolve(null));
-      });
-
-      // Clean up on client disconnect
-      request.raw.on('close', () => kill());
-
-      if (result) {
-        reply
-          .header('Content-Type', 'image/jpeg')
-          .header('Cache-Control', 'private, max-age=300')
-          .send(result);
+      if (IMAGE_EXTENSIONS.has(ext)) {
+        await handleImageProxy(videoUrl, opts.proxyConfig, request, reply);
       } else {
-        reply.status(404).send({ success: false, error: 'Could not generate thumbnail' });
+        await handleVideoThumbnail(videoUrl, t ?? '2', opts, request, reply);
       }
     },
   );
+}
+
+/**
+ * For images: fetch and proxy directly. Preserves original format.
+ */
+async function handleImageProxy(
+  url: string,
+  proxy: ProxyConfig | undefined,
+  request: any,
+  reply: any,
+) {
+  try {
+    const fetchOpts: RequestInit = {
+      signal: AbortSignal.timeout(10000),
+    };
+    if (proxy) {
+      (fetchOpts as any).agent = getHttpAgent(proxy);
+    }
+
+    const res = await fetch(url, fetchOpts);
+    if (!res.ok || !res.body) {
+      reply.status(404).send({ success: false, error: 'Could not fetch image' });
+      return;
+    }
+
+    const contentType = res.headers.get('content-type') ?? 'image/jpeg';
+    const chunks: Buffer[] = [];
+    // @ts-ignore
+    for await (const chunk of res.body) {
+      chunks.push(Buffer.from(chunk));
+    }
+    const data = Buffer.concat(chunks);
+
+    reply
+      .header('Content-Type', contentType)
+      .header('Cache-Control', 'private, max-age=300')
+      .send(data);
+  } catch {
+    reply.status(404).send({ success: false, error: 'Could not fetch image' });
+  }
+}
+
+/**
+ * For videos: use ffmpeg to extract a single frame as JPEG.
+ */
+async function handleVideoThumbnail(
+  videoUrl: string,
+  seekTime: string,
+  opts: { proxyConfig?: ProxyConfig; ffmpegPath: string },
+  request: any,
+  reply: any,
+) {
+  const { proc, stdout, kill } = spawnFfmpegStream({
+    inputUrl: videoUrl,
+    ffmpegPath: opts.ffmpegPath,
+    proxyConfig: opts.proxyConfig,
+    timeoutMs: 15000,
+    args: [
+      '-y',
+      '-i', videoUrl,
+      '-ss', seekTime,
+      '-frames:v', '1',
+      '-vf', 'scale=320:-1',
+      '-f', 'image2pipe',
+      '-vcodec', 'mjpeg',
+      'pipe:1',
+    ],
+  });
+
+  const chunks: Buffer[] = [];
+  stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+
+  const result = await new Promise<Buffer | null>((resolve) => {
+    proc.on('close', (code) => {
+      if (code === 0 && chunks.length > 0) {
+        resolve(Buffer.concat(chunks));
+      } else {
+        resolve(null);
+      }
+    });
+    proc.on('error', () => resolve(null));
+  });
+
+  request.raw.on('close', () => kill());
+
+  if (result) {
+    reply
+      .header('Content-Type', 'image/jpeg')
+      .header('Cache-Control', 'private, max-age=300')
+      .send(result);
+  } else {
+    reply.status(404).send({ success: false, error: 'Could not generate thumbnail' });
+  }
 }

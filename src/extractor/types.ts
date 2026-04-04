@@ -1,9 +1,11 @@
 export type VideoType = 'hls' | 'dash' | 'direct';
+export type MediaType = VideoType | 'image';
 export type DiscoveryMethod = 'network' | 'dom';
 
 export interface VideoSource {
   url: string;
-  type: VideoType;
+  type: VideoType | MediaType;
+  mediaKind: 'video' | 'image';
   mimeType?: string;
   quality?: string;
   fileExtension: string;
@@ -25,4 +27,5 @@ export interface ExtractOptions {
   preferredHosts?: string[];
   blockedHosts?: string[];
   allowedHosts?: string[];
+  includeImages?: boolean;
 }

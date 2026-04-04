@@ -3,12 +3,15 @@ import type { DB } from '../../db/index.js';
 import type { SessionStore } from '../../auth/sessions.js';
 import { createUser } from '../../auth/index.js';
 import { isStrongPassword, PASSWORD_REQUIREMENTS } from '../../crypto/index.js';
+import { getRelays, switchMullvadCountry, getVpnStatus } from '../../mullvad/index.js';
+import type { AppConfig } from '../../config.js';
 
 interface AdminRouteOpts {
   db: DB;
   sessions: SessionStore;
   preHandler: preHandlerHookHandler;
   requireAdmin: preHandlerHookHandler;
+  vpnBypassHosts?: string[];
 }
 
 export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
@@ -91,6 +94,64 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
       }
 
       reply.send({ success: true });
+    },
+  );
+
+  // --- VPN Management (admin only) ---
+
+  // Get available VPN countries/cities
+  app.get(
+    '/admin/vpn/relays',
+    { preHandler: [opts.preHandler, opts.requireAdmin] },
+    async (_request, reply) => {
+      const vpn = getVpnStatus();
+      if (!vpn.configured) {
+        reply.status(400).send({ success: false, error: 'VPN is not configured on this server' });
+        return;
+      }
+      try {
+        const relays = await getRelays();
+        return { success: true, data: { relays, currentLocation: vpn.location } };
+      } catch (err) {
+        reply.status(500).send({ success: false, error: 'Failed to fetch relay list' });
+      }
+    },
+  );
+
+  // Switch VPN country
+  app.post<{ Body: { location: string } }>(
+    '/admin/vpn/switch',
+    {
+      preHandler: [opts.preHandler, opts.requireAdmin],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['location'],
+          properties: {
+            location: { type: 'string', minLength: 2, maxLength: 10 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const vpn = getVpnStatus();
+      if (!vpn.configured) {
+        reply.status(400).send({ success: false, error: 'VPN is not configured on this server' });
+        return;
+      }
+
+      try {
+        const result = await switchMullvadCountry(
+          request.body.location,
+          request.log,
+          opts.vpnBypassHosts,
+        );
+        return { success: true, data: { country: result.country, city: result.city, location: request.body.location } };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Country switch failed';
+        reply.status(400).send({ success: false, error: msg });
+      }
     },
   );
 }

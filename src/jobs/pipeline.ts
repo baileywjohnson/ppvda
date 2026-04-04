@@ -8,8 +8,9 @@ import { extractVideos } from '../extractor/index.js';
 import { downloadVideo, selectBestVideo } from '../downloader/index.js';
 import { classifyUrl } from '../extractor/patterns.js';
 import { uploadToDarkreel } from '../hooks/darkreel.js';
+import { isVpnSwitching } from '../mullvad/index.js';
 import { getUserDarkreelCreds } from '../server/routes/settings.js';
-import type { VideoType } from '../extractor/types.js';
+import type { VideoType, MediaType } from '../extractor/types.js';
 
 export interface PipelineOpts {
   proxyConfig?: ProxyConfig;
@@ -27,7 +28,7 @@ export interface PipelineOpts {
 }
 
 export interface Pipeline {
-  submit(userId: string, input: { url?: string; videoUrl?: string; filename?: string; timeout?: number }): Promise<string>;
+  submit(userId: string, input: { url?: string; videoUrl?: string; filename?: string; timeout?: number; useVpn?: boolean }): Promise<string>;
 }
 
 /** Simple semaphore for concurrency limiting */
@@ -86,15 +87,21 @@ export function createPipeline(
 async function processJob(
   jobId: string,
   userId: string,
-  input: { url?: string; videoUrl?: string; filename?: string; timeout?: number },
+  input: { url?: string; videoUrl?: string; filename?: string; timeout?: number; useVpn?: boolean },
   store: JobStore,
   opts: PipelineOpts,
   db: DB,
   sessions: SessionStore,
   logger: FastifyBaseLogger,
 ) {
+  const proxy = input.useVpn === false ? undefined : opts.proxyConfig;
+
+  if (proxy && isVpnSwitching()) {
+    store.update(jobId, { status: 'failed', error: 'VPN is switching countries, try again in a moment' });
+    return;
+  }
   let targetUrl: string;
-  let targetType: VideoType;
+  let targetType: MediaType;
 
   // Step 1: Extract (if needed)
   if (input.videoUrl) {
@@ -114,7 +121,7 @@ async function processJob(
         url: input.url,
         timeoutMs: input.timeout ?? opts.defaultTimeoutMs,
         networkIdleMs: opts.defaultNetworkIdleMs,
-        proxy: opts.proxyConfig,
+        proxy,
         preferredHosts: opts.preferredHosts,
         blockedHosts: opts.blockedHosts,
         allowedHosts: opts.allowedHosts,
@@ -132,7 +139,7 @@ async function processJob(
       }
 
       targetUrl = best.url;
-      targetType = best.type as VideoType;
+      targetType = best.type as MediaType;
       store.update(jobId, { status: 'downloading', videoType: best.type });
     } catch (err) {
       logger.error({ jobId }, 'Extraction failed');
@@ -152,7 +159,7 @@ async function processJob(
       outputDir: opts.downloadDir,
       filename: input.filename,
       timeoutMs: opts.downloadTimeoutMs,
-      proxy: opts.proxyConfig,
+      proxy,
       ffmpegPath: opts.ffmpegPath,
     });
 

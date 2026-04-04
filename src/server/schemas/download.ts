@@ -5,6 +5,7 @@ export const downloadRequestSchema = {
     videoUrl: { type: 'string' },
     filename: { type: 'string', maxLength: 200 },
     timeout: { type: 'number', minimum: 1000, maximum: 600000 },
+    useVpn: { type: 'boolean' },
   },
   anyOf: [
     { required: ['url'] },

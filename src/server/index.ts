@@ -8,6 +8,7 @@ import type { AppConfig } from '../config.js';
 import type { DB } from '../db/index.js';
 import type { SessionStore } from '../auth/sessions.js';
 import { parseProxyUrl, type ProxyConfig } from '../proxy/index.js';
+import { getVpnStatus, getRelays, switchMullvadCountry, isVpnSwitching } from '../mullvad/index.js';
 import { AppError } from '../utils/errors.js';
 import { setupAuth } from '../auth/index.js';
 import { JobStore } from '../jobs/store.js';
@@ -106,17 +107,20 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
   app.get('/config', { preHandler: authenticate }, async (request) => {
     const userId = (request as any).user.sub;
     const isAdmin = (request as any).user.isAdmin;
+    const vpn = getVpnStatus();
+    const hasProxy = !!proxyConfig || vpn.configured;
     return {
       enableThumbnails: config.enableThumbnails,
       darkreelConfigured: db.hasDarkreelCreds(userId),
       isAdmin,
       userId,
+      vpn: { available: hasProxy, mullvad: vpn.configured, location: vpn.location },
     };
   });
 
   // Register routes
   await app.register(healthRoutes);
-  await app.register(adminRoutes, { db, sessions, preHandler: authenticate, requireAdmin });
+  await app.register(adminRoutes, { db, sessions, preHandler: authenticate, requireAdmin, vpnBypassHosts: config.vpnBypassHosts });
   await app.register(settingsRoutes, { db, sessions, preHandler: authenticate });
   await app.register(jobRoutes, { store: jobStore, pipeline, preHandler: authenticate });
   await app.register(extractRoutes, { ...routeOpts, preHandler: authenticate });

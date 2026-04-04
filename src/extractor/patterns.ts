@@ -1,4 +1,4 @@
-import type { VideoType } from './types.js';
+import type { VideoType, MediaType } from './types.js';
 
 const VIDEO_EXTENSIONS: Record<string, VideoType> = {
   '.m3u8': 'hls',
@@ -23,11 +23,16 @@ const VIDEO_MIME_MAP: Record<string, VideoType> = {
   'video/x-matroska': 'direct',
 };
 
+const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif', '.bmp', '.tiff']);
+
+const IMAGE_MIME_PREFIXES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/bmp', 'image/tiff'];
+
 // Segments — we track these to potentially find their parent manifest
 const SEGMENT_EXTENSIONS = new Set(['.ts', '.m4s', '.fmp4']);
 
 export interface PatternMatch {
-  type: VideoType;
+  type: MediaType;
+  mediaKind: 'video' | 'image';
   fileExtension: string;
   quality?: string;
 }
@@ -66,7 +71,16 @@ export function matchByExtension(url: string): PatternMatch | null {
   const ext = getUrlExtension(url);
   const type = VIDEO_EXTENSIONS[ext];
   if (!type) return null;
-  return { type, fileExtension: ext, quality: detectQuality(url) };
+  return { type, mediaKind: 'video', fileExtension: ext, quality: detectQuality(url) };
+}
+
+/**
+ * Check if a URL matches a known image pattern by extension.
+ */
+export function matchImageByExtension(url: string): PatternMatch | null {
+  const ext = getUrlExtension(url);
+  if (!IMAGE_EXTENSIONS.has(ext)) return null;
+  return { type: 'image', mediaKind: 'image', fileExtension: ext };
 }
 
 /**
@@ -83,7 +97,27 @@ export function matchByContentType(contentType: string): PatternMatch | null {
     direct: '.mp4',
   };
 
-  return { type, fileExtension: extMap[type] };
+  return { type, mediaKind: 'video', fileExtension: extMap[type] };
+}
+
+/**
+ * Check if a content-type header indicates image content.
+ */
+export function matchImageByContentType(contentType: string): PatternMatch | null {
+  const mime = contentType.split(';')[0].trim().toLowerCase();
+  if (!IMAGE_MIME_PREFIXES.includes(mime)) return null;
+
+  const extMap: Record<string, string> = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'image/avif': '.avif',
+    'image/bmp': '.bmp',
+    'image/tiff': '.tiff',
+  };
+
+  return { type: 'image', mediaKind: 'image', fileExtension: extMap[mime] ?? '.jpg' };
 }
 
 /**
@@ -94,12 +128,14 @@ export function isSegmentUrl(url: string): boolean {
 }
 
 /**
- * Combined check: is this URL a video source?
+ * Combined check: is this URL a media source?
  */
 export function classifyUrl(
   url: string,
   contentType?: string,
+  options?: { includeImages?: boolean },
 ): PatternMatch | null {
+  // Video patterns first
   const byExt = matchByExtension(url);
   if (byExt) return byExt;
 
@@ -108,5 +144,26 @@ export function classifyUrl(
     if (byMime) return { ...byMime, quality: detectQuality(url) };
   }
 
+  // Image patterns (only if opted in)
+  if (options?.includeImages) {
+    const imgExt = matchImageByExtension(url);
+    if (imgExt) return imgExt;
+
+    if (contentType) {
+      const imgMime = matchImageByContentType(contentType);
+      if (imgMime) return imgMime;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Check if a URL looks like a direct link to a media file (video or image).
+ */
+export function isDirectMediaUrl(url: string): PatternMatch | null {
+  const ext = getUrlExtension(url);
+  if (VIDEO_EXTENSIONS[ext]) return { type: VIDEO_EXTENSIONS[ext], mediaKind: 'video', fileExtension: ext };
+  if (IMAGE_EXTENSIONS.has(ext)) return { type: 'image', mediaKind: 'image', fileExtension: ext };
   return null;
 }

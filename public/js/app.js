@@ -14,6 +14,9 @@
   const resultsTitle = $('#results-title');
   const backBtn = $('#back-btn');
   const logoutBtn = $('#logout-btn');
+  const imagesSection = $('#images-section');
+  const imagesList = $('#images-list');
+  const imagesCount = $('#images-count');
   const filteredSection = $('#filtered-section');
   const filteredList = $('#filtered-list');
   const filteredCount = $('#filtered-count');
@@ -31,9 +34,12 @@
   let darkreelConfigured = false;
   let isAdmin = false;
   let currentUserId = null;
+  let vpnAvailable = false;
+  let vpnLocation = null;
 
   // Extraction results (in-memory only, never persisted)
   let extractionResult = null;
+  let extractAbort = null; // AbortController for in-flight extraction
 
   // --- Init ---
   tryEnterApp();
@@ -90,16 +96,42 @@
     btn.innerHTML = '<span class="spinner"></span>Extracting...';
     extractError.hidden = true;
 
+    // Check if URL is a direct link to a media file — skip extraction
+    const directMatch = isDirectMediaUrl(url);
+    if (directMatch) {
+      extractionResult = { videos: [directMatch], pageTitle: '' };
+      urlInput.value = '';
+      showResultsStreaming();
+      removeLoadingIndicator();
+      addVideoCard(directMatch, 0);
+      // Enable download immediately (no probe needed for direct URLs)
+      const card = resultsList.querySelector('[data-vid-idx="0"]');
+      if (card) card.querySelectorAll('.btn-download, .btn-upload').forEach(b => { b.disabled = false; });
+      const spinner = resultsList.querySelector('[data-probe-spinner="0"]');
+      if (spinner) spinner.remove();
+      updateResultsTitle();
+      btn.disabled = false;
+      btn.textContent = 'Extract';
+      return;
+    }
+
+    // Abort any previous extraction
+    if (extractAbort) extractAbort.abort();
+    extractAbort = new AbortController();
+
     // Switch to results view immediately with empty list
     extractionResult = { videos: [], pageTitle: '' };
     urlInput.value = '';
     showResultsStreaming();
 
     try {
+      const useVpn = vpnAvailable ? $('#use-vpn').checked : undefined;
+      const includeImages = $('#include-images')?.checked || false;
       const res = await api('/extract/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, useVpn, includeImages }),
+        signal: extractAbort.signal,
       });
 
       if (!res.ok) {
@@ -151,13 +183,16 @@
       if (extractionResult.videos.length === 0) {
         resultsList.innerHTML = '<p class="empty">No videos found on this page</p>';
       }
-    } catch {
-      if (extractionResult.videos.length === 0) {
+    } catch (err) {
+      // Don't show error if the request was intentionally aborted (Back button)
+      if (err && err.name === 'AbortError') return;
+      if (extractionResult && extractionResult.videos.length === 0) {
         extractError.textContent = 'Connection failed';
         extractError.hidden = false;
         hideResults();
       }
     } finally {
+      extractAbort = null;
       removeLoadingIndicator();
       btn.disabled = false;
       btn.textContent = 'Extract';
@@ -166,25 +201,38 @@
 
   // --- Back button ---
   backBtn.addEventListener('click', () => {
+    // Abort any in-flight extraction
+    if (extractAbort) {
+      extractAbort.abort();
+      extractAbort = null;
+    }
     extractionResult = null;
     hideResults();
+    // Reset submit button in case it's still in extracting state
+    const btn = submitForm.querySelector('button');
+    btn.disabled = false;
+    btn.textContent = 'Extract';
   });
 
   // --- Results rendering ---
   function showResultsStreaming() {
     submitSection.hidden = true;
     resultsSection.hidden = false;
-    resultsList.innerHTML = '<div class="results-loading"><span class="spinner"></span> Searching for videos...</div>';
+    const searchLabel = $('#include-images')?.checked ? 'Searching for videos and images...' : 'Searching for videos...';
+    resultsList.innerHTML = '<div class="results-loading"><span class="spinner"></span> ' + searchLabel + '</div>';
     updateResultsTitle();
   }
 
   function updateResultsTitle() {
-    // Count only cards in the main results list (not filtered)
-    const mainCount = resultsList.querySelectorAll('.video-card').length;
-    const total = extractionResult?.videos?.length ?? 0;
+    const videoCount = resultsList.querySelectorAll('.video-card').length;
+    const imageCount = imagesList.querySelectorAll('.video-card').length;
+    const total = videoCount + imageCount;
     if (total > 0) {
-      resultsTitle.textContent = `${mainCount} video${mainCount !== 1 ? 's' : ''} found`;
-    } else {
+      const parts = [];
+      if (videoCount > 0) parts.push(`${videoCount} video${videoCount !== 1 ? 's' : ''}`);
+      if (imageCount > 0) parts.push(`${imageCount} image${imageCount !== 1 ? 's' : ''}`);
+      resultsTitle.textContent = parts.join(', ') + ' found';
+    } else if (extractionResult) {
       resultsTitle.textContent = 'Extracting...';
     }
   }
@@ -197,9 +245,11 @@
     let domain = '';
     try { domain = new URL(v.url).hostname; } catch {}
 
-    const thumbHtml = enableThumbnails
-      ? `<div class="thumb-wrapper"><span class="spinner-mini thumb-spinner"></span><img class="video-thumb" loading="lazy" src="/thumbnail?videoUrl=${encodeURIComponent(v.url)}" alt="" width="160" height="90"></div>`
-      : '';
+    let thumbHtml = '';
+    if (v.mediaKind === 'image' || enableThumbnails) {
+      // Proxy all thumbnails through /thumbnail to respect CSP (img-src 'self')
+      thumbHtml = `<div class="thumb-wrapper"><span class="spinner-mini thumb-spinner"></span><img class="video-thumb" loading="lazy" src="/thumbnail?videoUrl=${encodeURIComponent(v.url)}" alt="" width="160" height="90"></div>`;
+    }
 
     const qualityBadge = v.quality
       ? `<span class="quality-badge">${esc(v.quality)}</span>`
@@ -239,12 +289,19 @@
       thumb.addEventListener('error', () => { const w = card.querySelector('.thumb-wrapper'); if (w) w.style.display = 'none'; });
     }
 
-    // Insert before the loading indicator (if present), otherwise append
-    const loader = resultsList.querySelector('.results-loading');
-    if (loader) {
-      resultsList.insertBefore(card, loader);
+    // Route to the correct section based on media kind
+    if (v.mediaKind === 'image') {
+      imagesList.appendChild(card);
+      imagesSection.hidden = false;
+      imagesCount.textContent = imagesList.children.length;
     } else {
-      resultsList.appendChild(card);
+      // Insert before the loading indicator (if present), otherwise append
+      const loader = resultsList.querySelector('.results-loading');
+      if (loader) {
+        resultsList.insertBefore(card, loader);
+      } else {
+        resultsList.appendChild(card);
+      }
     }
     updateResultsTitle();
   }
@@ -255,8 +312,9 @@
   }
 
   function updateVideoMeta(idx, meta) {
-    // Find the card — could be in results or already in filtered
+    // Find the card — could be in results, images, or filtered
     const card = resultsList.querySelector(`[data-vid-idx="${idx}"]`)
+              || imagesList.querySelector(`[data-vid-idx="${idx}"]`)
               || filteredList.querySelector(`[data-vid-idx="${idx}"]`);
     if (!card) return;
 
@@ -301,12 +359,17 @@
   }
 
   function moveToFiltered(card) {
-    // Only move if it's currently in the main results list
-    if (!resultsList.contains(card)) return;
+    // Only move if it's currently in a results list (not already filtered)
+    if (!resultsList.contains(card) && !imagesList.contains(card)) return;
+    const wasImage = imagesList.contains(card);
     card.remove();
     filteredList.appendChild(card);
     filteredSection.hidden = false;
     filteredCount.textContent = filteredList.children.length;
+    if (wasImage) {
+      imagesCount.textContent = imagesList.children.length;
+      if (imagesList.children.length === 0) imagesSection.hidden = true;
+    }
     updateResultsTitle();
   }
 
@@ -314,6 +377,9 @@
     resultsSection.hidden = true;
     submitSection.hidden = false;
     resultsList.innerHTML = '';
+    imagesList.innerHTML = '';
+    imagesSection.hidden = true;
+    imagesCount.textContent = '0';
     filteredList.innerHTML = '';
     filteredSection.hidden = true;
     filteredCount.textContent = '0';
@@ -330,10 +396,15 @@
     btn.textContent = 'Downloading...';
 
     try {
+      const useVpn = vpnAvailable ? $('#use-vpn').checked : undefined;
+      const isImage = video.mediaKind === 'image';
+      const ext = video.fileExtension || (isImage ? '.jpg' : '.mp4');
+      const defaultName = (isImage ? 'image' : 'video') + ext;
+
       const res = await api('/stream-download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ videoUrl: video.url }),
+        body: JSON.stringify({ videoUrl: video.url, useVpn }),
       });
 
       if (!res.ok) {
@@ -345,7 +416,7 @@
       const blob = await res.blob();
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'video.mp4';
+      a.download = defaultName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -371,10 +442,11 @@
     btn.innerHTML = '<span class="spinner-mini"></span> Sending...';
 
     try {
+      const useVpn = vpnAvailable ? $('#use-vpn').checked : undefined;
       const res = await api('/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ videoUrl: video.url }),
+        body: JSON.stringify({ videoUrl: video.url, useVpn }),
       });
 
       if (res.ok) {
@@ -415,8 +487,16 @@
         darkreelConfigured = data.darkreelConfigured ?? false;
         isAdmin = data.isAdmin ?? false;
         currentUserId = data.userId ?? null;
+        vpnAvailable = data.vpn?.available ?? false;
+        vpnLocation = data.vpn?.location ?? null;
         // Show/hide admin button
         adminBtn.hidden = !isAdmin;
+        // Show/hide VPN toggle
+        const vpnToggle = $('#vpn-toggle');
+        vpnToggle.hidden = !vpnAvailable;
+        if (vpnAvailable && vpnLocation) {
+          $('#vpn-location').textContent = vpnLocation.toUpperCase();
+        }
       }
     } catch { /* defaults are fine */ }
   }
@@ -461,6 +541,26 @@
   function api(path, opts = {}) {
     const headers = { ...opts.headers };
     return fetch(path, { ...opts, headers, credentials: 'same-origin' });
+  }
+
+  const DIRECT_VIDEO_EXTS = ['.mp4', '.webm', '.mov', '.avi', '.flv', '.mkv', '.m3u8', '.mpd'];
+  const DIRECT_IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif', '.bmp'];
+
+  function isDirectMediaUrl(url) {
+    try {
+      const pathname = new URL(url).pathname.toLowerCase();
+      const dot = pathname.lastIndexOf('.');
+      if (dot === -1) return null;
+      const ext = pathname.substring(dot);
+
+      if (DIRECT_VIDEO_EXTS.includes(ext)) {
+        return { url, type: 'direct', mediaKind: 'video', fileExtension: ext, discoveredVia: 'direct' };
+      }
+      if (DIRECT_IMAGE_EXTS.includes(ext)) {
+        return { url, type: 'image', mediaKind: 'image', fileExtension: ext, discoveredVia: 'direct' };
+      }
+    } catch {}
+    return null;
   }
 
   function esc(str) {
@@ -681,6 +781,7 @@
     adminSection.hidden = false;
     sessionStorage.setItem('ppvda_view', 'admin');
     await loadUsers();
+    if (vpnAvailable) await loadVpnRelays();
   });
 
   adminBackBtn.addEventListener('click', () => {
@@ -756,6 +857,80 @@
       status.textContent = 'Connection failed';
       status.className = 'settings-status error';
       status.hidden = false;
+    }
+  });
+  // --- Admin VPN ---
+  async function loadVpnRelays() {
+    const section = $('#vpn-admin-section');
+    const select = $('#vpn-country-select');
+
+    try {
+      const res = await api('/admin/vpn/relays');
+      if (!res.ok) { section.hidden = true; return; }
+      const data = await res.json();
+      const relays = data.data?.relays ?? [];
+      const current = data.data?.currentLocation ?? '';
+
+      select.innerHTML = '';
+      for (const country of relays) {
+        if (country.cities.length === 1) {
+          const opt = document.createElement('option');
+          opt.value = `${country.code}-${country.cities[0].code}`;
+          opt.textContent = `${country.name} — ${country.cities[0].name}`;
+          if (opt.value === current || country.code === current) opt.selected = true;
+          select.appendChild(opt);
+        } else {
+          for (const city of country.cities) {
+            const opt = document.createElement('option');
+            opt.value = `${country.code}-${city.code}`;
+            opt.textContent = `${country.name} — ${city.name}`;
+            if (opt.value === current) opt.selected = true;
+            select.appendChild(opt);
+          }
+        }
+      }
+      section.hidden = false;
+    } catch {
+      section.hidden = true;
+    }
+  }
+
+  $('#vpn-switch-btn').addEventListener('click', async () => {
+    const select = $('#vpn-country-select');
+    const status = $('#vpn-switch-status');
+    const btn = $('#vpn-switch-btn');
+    const location = select.value;
+    if (!location) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Switching...';
+    status.hidden = true;
+
+    try {
+      const res = await api('/admin/vpn/switch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ location }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        vpnLocation = location;
+        $('#vpn-location').textContent = location.toUpperCase();
+        status.textContent = `Switched to ${data.data?.country} — ${data.data?.city}`;
+        status.className = 'settings-status success';
+      } else {
+        status.textContent = data.error || 'Switch failed';
+        status.className = 'settings-status error';
+      }
+      status.hidden = false;
+    } catch {
+      status.textContent = 'Connection failed';
+      status.className = 'settings-status error';
+      status.hidden = false;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Switch';
     }
   });
 })();

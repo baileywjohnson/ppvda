@@ -2,11 +2,17 @@ import type { Page } from 'playwright';
 import { classifyUrl } from './patterns.js';
 import type { VideoSource } from './types.js';
 
+interface ScanOptions {
+  includeImages?: boolean;
+}
+
 /**
- * Scan the DOM for video-related elements and extract source URLs.
+ * Scan the DOM for media elements and extract source URLs.
  */
-export async function scanDomForVideos(page: Page): Promise<VideoSource[]> {
-  const urls = await page.evaluate(() => {
+export async function scanDomForVideos(page: Page, options?: ScanOptions): Promise<VideoSource[]> {
+  const includeImages = options?.includeImages ?? false;
+
+  const urls = await page.evaluate((scanImages: boolean) => {
     const results: string[] = [];
 
     // <video src="..."> and <video><source src="..."></video>
@@ -59,21 +65,46 @@ export async function scanDomForVideos(page: Page): Promise<VideoSource[]> {
       }
     } catch {}
 
-    return [...new Set(results)];
-  });
+    // Image scanning (opt-in)
+    if (scanImages) {
+      for (const img of document.querySelectorAll('img')) {
+        const src = img.src || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
+        if (!src) continue;
+        // Skip tiny images (likely icons, avatars, tracking pixels)
+        if (img.naturalWidth > 0 && img.naturalWidth < 100) continue;
+        if (img.naturalHeight > 0 && img.naturalHeight < 100) continue;
+        results.push(src);
+      }
 
-  const videos: VideoSource[] = [];
+      // <picture> elements with srcset
+      for (const picture of document.querySelectorAll('picture')) {
+        for (const source of picture.querySelectorAll('source')) {
+          const srcset = source.getAttribute('srcset');
+          if (srcset) {
+            // Take the largest source from srcset
+            const entries = srcset.split(',').map(s => s.trim().split(/\s+/)[0]).filter(Boolean);
+            results.push(...entries);
+          }
+        }
+      }
+    }
+
+    return [...new Set(results)];
+  }, includeImages);
+
+  const media: VideoSource[] = [];
   const seen = new Set<string>();
 
   for (const url of urls) {
     if (!url || seen.has(url)) continue;
     seen.add(url);
 
-    const match = classifyUrl(url);
+    const match = classifyUrl(url, undefined, { includeImages });
     if (match) {
-      videos.push({
+      media.push({
         url,
         type: match.type,
+        mediaKind: match.mediaKind,
         quality: match.quality,
         fileExtension: match.fileExtension,
         discoveredVia: 'dom',
@@ -81,5 +112,5 @@ export async function scanDomForVideos(page: Page): Promise<VideoSource[]> {
     }
   }
 
-  return videos;
+  return media;
 }

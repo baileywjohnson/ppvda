@@ -4,10 +4,13 @@ import { extractRequestSchema, extractResponseSchema } from '../schemas/extract.
 import { probeVideo, qualityFromResolution } from '../../downloader/probe.js';
 import type { ProxyConfig } from '../../proxy/types.js';
 import { isPrivateUrl } from '../../utils/url.js';
+import { isVpnSwitching } from '../../mullvad/index.js';
 
 interface ExtractBody {
   url: string;
   timeout?: number;
+  useVpn?: boolean;
+  includeImages?: boolean;
 }
 
 export async function extractRoutes(
@@ -27,7 +30,13 @@ export async function extractRoutes(
       ...(opts.preHandler ? { preHandler: opts.preHandler } : {}),
     },
     async (request, reply) => {
-      const { url, timeout } = request.body;
+      const { url, timeout, useVpn, includeImages } = request.body;
+      const proxy = useVpn === false ? undefined : opts.proxyConfig;
+
+      if (proxy && isVpnSwitching()) {
+        reply.status(503).send({ success: false, error: 'VPN is switching countries, try again in a moment' });
+        return;
+      }
 
       if (await isPrivateUrl(url)) {
         reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
@@ -38,10 +47,11 @@ export async function extractRoutes(
         url,
         timeoutMs: timeout ?? opts.defaultTimeoutMs,
         networkIdleMs: opts.defaultNetworkIdleMs,
-        proxy: opts.proxyConfig,
+        proxy,
         preferredHosts: opts.preferredHosts,
         blockedHosts: opts.blockedHosts,
         allowedHosts: opts.allowedHosts,
+        includeImages,
       });
 
       return { success: true, data: result };
@@ -59,7 +69,13 @@ export async function extractRoutes(
       ...(opts.preHandler ? { preHandler: opts.preHandler } : {}),
     },
     async (request, reply) => {
-      const { url, timeout } = request.body;
+      const { url, timeout, useVpn, includeImages } = request.body;
+      const proxy = useVpn === false ? undefined : opts.proxyConfig;
+
+      if (proxy && isVpnSwitching()) {
+        reply.status(503).send({ success: false, error: 'VPN is switching countries, try again in a moment' });
+        return;
+      }
 
       if (await isPrivateUrl(url)) {
         reply.raw.writeHead(400, { 'Content-Type': 'application/json' });
@@ -90,10 +106,11 @@ export async function extractRoutes(
         url,
         timeoutMs: timeout ?? opts.defaultTimeoutMs,
         networkIdleMs: opts.defaultNetworkIdleMs,
-        proxy: opts.proxyConfig,
+        proxy,
         preferredHosts: opts.preferredHosts,
         blockedHosts: opts.blockedHosts,
         allowedHosts: opts.allowedHosts,
+        includeImages,
         onVideo: (video) => {
           const idx = videoIndex++;
           write('video', { ...video, _idx: idx });
@@ -102,7 +119,7 @@ export async function extractRoutes(
           const probeP = probeVideo({
             url: video.url,
             ffprobePath: opts.ffmpegPath.replace(/ffmpeg$/, 'ffprobe'),
-            proxyConfig: opts.proxyConfig,
+            proxyConfig: proxy,
             timeoutMs: 10000,
           }).then((meta) => {
             if (closed) return;

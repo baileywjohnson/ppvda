@@ -34,7 +34,7 @@ export async function downloadVideo(options: FullDownloadOptions): Promise<Downl
   const effectiveTempDir = tempDir ?? join(outputDir, '.tmp');
 
   const id = generateId();
-  const ext = type === 'direct' ? extFromUrl(url) : '.mp4';
+  const ext = type === 'image' ? extFromUrl(url, '.jpg') : type === 'direct' ? extFromUrl(url) : '.mp4';
   const finalFilename = sanitizeFilename(filename ?? filenameFromUrl(url)) + ext;
   const finalPath = join(outputDir, finalFilename);
   const tmpPath = tempPath(effectiveTempDir, id, ext);
@@ -68,7 +68,8 @@ export async function downloadVideo(options: FullDownloadOptions): Promise<Downl
         durationSec = result.durationSec;
         break;
       }
-      case 'direct': {
+      case 'direct':
+      case 'image': {
         await downloadDirect({
           url,
           outputPath: tmpPath,
@@ -78,7 +79,7 @@ export async function downloadVideo(options: FullDownloadOptions): Promise<Downl
         break;
       }
       default:
-        throw new DownloadError(`Unknown video type: ${type}`, 'UNKNOWN_TYPE');
+        throw new DownloadError(`Unknown media type: ${type}`, 'UNKNOWN_TYPE');
     }
 
     // Atomic move from temp to final destination
@@ -101,7 +102,7 @@ export async function downloadVideo(options: FullDownloadOptions): Promise<Downl
   }
 }
 
-function extFromUrl(url: string): string {
+function extFromUrl(url: string, fallback = '.mp4'): string {
   try {
     const pathname = new URL(url).pathname;
     const dot = pathname.lastIndexOf('.');
@@ -110,7 +111,7 @@ function extFromUrl(url: string): string {
       if (ext.length <= 6) return ext;
     }
   } catch {}
-  return '.mp4';
+  return fallback;
 }
 
 function filenameFromUrl(url: string): string {

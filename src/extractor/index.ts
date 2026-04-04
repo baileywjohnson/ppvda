@@ -52,6 +52,7 @@ export async function extractVideos(
     const interceptor = interceptNetworkRequests(page, {
       timeoutMs,
       networkIdleMs,
+      includeImages: options.includeImages,
     });
 
     // Navigate to the page
@@ -71,8 +72,8 @@ export async function extractVideos(
     // Wait for network to settle (interceptor resolves on idle or timeout)
     const networkVideos = await interceptor.promise;
 
-    // Scan DOM for additional video sources
-    const domVideos = await scanDomForVideos(page);
+    // Scan DOM for additional media sources
+    const domVideos = await scanDomForVideos(page, { includeImages: options.includeImages });
 
     // Get page title
     const pageTitle = await page.title().catch(() => '');
@@ -146,6 +147,7 @@ export async function extractVideosStreaming(
     const interceptor = interceptNetworkRequests(page, {
       timeoutMs,
       networkIdleMs,
+      includeImages: options.includeImages,
       onVideo: emitVideo,
     });
 
@@ -164,7 +166,7 @@ export async function extractVideosStreaming(
     // Run DOM scan and network idle in parallel
     const [networkVideos, domVideos] = await Promise.all([
       interceptor.promise,
-      scanDomForVideos(page),
+      scanDomForVideos(page, { includeImages: options.includeImages }),
     ]);
 
     // Emit any DOM-discovered videos not already emitted via network

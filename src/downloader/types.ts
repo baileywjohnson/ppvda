@@ -1,8 +1,8 @@
-import type { VideoType } from '../extractor/types.js';
+import type { MediaType } from '../extractor/types.js';
 
 export interface DownloadOptions {
   url: string;
-  type: VideoType;
+  type: MediaType;
   outputDir: string;
   filename?: string;
   timeoutMs?: number;

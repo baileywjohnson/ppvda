@@ -5,6 +5,7 @@ export const createJobRequestSchema = {
     videoUrl: { type: 'string' },
     filename: { type: 'string', maxLength: 200 },
     timeout: { type: 'number' },
+    useVpn: { type: 'boolean' },
   },
   anyOf: [
     { required: ['url'] },

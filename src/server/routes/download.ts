@@ -5,14 +5,16 @@ import { classifyUrl } from '../../extractor/patterns.js';
 import { ExtractionError } from '../../utils/errors.js';
 import { downloadRequestSchema, downloadResponseSchema } from '../schemas/download.js';
 import type { ProxyConfig } from '../../proxy/types.js';
-import type { VideoType } from '../../extractor/types.js';
+import type { VideoType, MediaType } from '../../extractor/types.js';
 import { isPrivateUrl } from '../../utils/url.js';
+import { isVpnSwitching } from '../../mullvad/index.js';
 
 interface DownloadBody {
   url?: string;
   videoUrl?: string;
   filename?: string;
   timeout?: number;
+  useVpn?: boolean;
 }
 
 export async function downloadRoutes(
@@ -40,7 +42,12 @@ export async function downloadRoutes(
       ...(opts.preHandler ? { preHandler: opts.preHandler } : {}),
     },
     async (request, reply) => {
-      const { url, videoUrl, filename, timeout } = request.body;
+      const { url, videoUrl, filename, timeout, useVpn } = request.body;
+      const proxy = useVpn === false ? undefined : opts.proxyConfig;
+
+      if (proxy && isVpnSwitching()) {
+        throw new ExtractionError('VPN is switching countries, try again in a moment', 'VPN_SWITCHING');
+      }
 
       // Block private/internal URLs
       const urlToCheck = videoUrl ?? url;
@@ -49,7 +56,7 @@ export async function downloadRoutes(
       }
 
       let targetUrl: string;
-      let targetType: VideoType;
+      let targetType: MediaType;
 
       if (videoUrl) {
         // Direct video URL provided — skip extraction
@@ -71,7 +78,7 @@ export async function downloadRoutes(
           url,
           timeoutMs: timeout ?? opts.defaultTimeoutMs,
           networkIdleMs: opts.defaultNetworkIdleMs,
-          proxy: opts.proxyConfig,
+          proxy,
           preferredHosts: opts.preferredHosts,
           blockedHosts: opts.blockedHosts,
           allowedHosts: opts.allowedHosts,
@@ -87,7 +94,7 @@ export async function downloadRoutes(
         }
 
         targetUrl = best.url;
-        targetType = best.type as VideoType;
+        targetType = best.type as MediaType;
       }
 
       const result = await downloadVideo({
@@ -96,7 +103,7 @@ export async function downloadRoutes(
         outputDir: opts.downloadDir,
         filename,
         timeoutMs: opts.downloadTimeoutMs,
-        proxy: opts.proxyConfig,
+        proxy,
         ffmpegPath: opts.ffmpegPath,
       });
 

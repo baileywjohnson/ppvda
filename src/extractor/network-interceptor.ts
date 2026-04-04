@@ -47,11 +47,12 @@ function isAdDomain(url: string): boolean {
 interface InterceptorOptions {
   timeoutMs: number;
   networkIdleMs: number;
+  includeImages?: boolean;
   onVideo?: (video: VideoSource) => void;
 }
 
 /**
- * Listen to page network responses and collect video URLs.
+ * Listen to page network responses and collect media URLs.
  * Resolves when:
  * - No new network activity for `networkIdleMs`, OR
  * - Overall `timeoutMs` is reached
@@ -104,11 +105,19 @@ export function interceptNetworkRequests(
       return;
     }
 
-    const match = classifyUrl(url, contentType);
+    const match = classifyUrl(url, contentType, { includeImages: options.includeImages });
     if (match && !found.has(url) && !isAdDomain(url)) {
+      // For images intercepted via network, skip tiny responses (likely icons/favicons)
+      const contentLength = parseInt(response.headers()['content-length'] ?? '0', 10);
+      if (match.mediaKind === 'image' && contentLength > 0 && contentLength < 10240) {
+        resetIdle();
+        return;
+      }
+
       const video: VideoSource = {
         url,
         type: match.type,
+        mediaKind: match.mediaKind,
         mimeType: contentType || undefined,
         quality: match.quality,
         fileExtension: match.fileExtension,

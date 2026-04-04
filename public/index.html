@@ -30,7 +30,16 @@
     <section id="submit-section">
       <form id="submit-form">
         <input type="url" id="video-url" placeholder="Paste video page URL..." required>
-        <button type="submit">Extract</button>
+        <div class="submit-row">
+          <label class="checkbox-label vpn-toggle" id="vpn-toggle" hidden>
+            <input type="checkbox" id="use-vpn" checked> VPN
+            <span class="vpn-location" id="vpn-location"></span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="include-images"> Images
+          </label>
+          <button type="submit">Extract</button>
+        </div>
       </form>
       <p id="extract-error" class="error" hidden></p>
     </section>
@@ -41,8 +50,12 @@
         <h2 id="results-title">Extracted Videos</h2>
       </div>
       <div id="results-list"></div>
+      <details id="images-section" hidden>
+        <summary>Images (<span id="images-count">0</span>)</summary>
+        <div id="images-list"></div>
+      </details>
       <details id="filtered-section" hidden>
-        <summary id="filtered-toggle">Possible ads / tiny files (<span id="filtered-count">0</span>)</summary>
+        <summary>Possible ads / tiny files (<span id="filtered-count">0</span>)</summary>
         <div id="filtered-list"></div>
       </details>
     </section>
@@ -109,6 +122,18 @@
           <button type="submit">Create User</button>
         </form>
         <p id="create-user-status" class="settings-status" hidden></p>
+      </div>
+
+      <div class="settings-group" id="vpn-admin-section" hidden>
+        <h3>VPN Country</h3>
+        <p class="settings-desc">Switch the server-wide VPN exit location. This affects all users.</p>
+        <div class="vpn-selector">
+          <select id="vpn-country-select">
+            <option value="">Loading...</option>
+          </select>
+          <button type="button" id="vpn-switch-btn">Switch</button>
+        </div>
+        <p id="vpn-switch-status" class="settings-status" hidden></p>
       </div>
 
       <div class="settings-group">

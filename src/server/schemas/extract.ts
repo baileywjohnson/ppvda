@@ -4,6 +4,8 @@ export const extractRequestSchema = {
   properties: {
     url: { type: 'string', format: 'uri' },
     timeout: { type: 'number', minimum: 1000, maximum: 120000 },
+    useVpn: { type: 'boolean' },
+    includeImages: { type: 'boolean' },
   },
   additionalProperties: false,
 } as const;
