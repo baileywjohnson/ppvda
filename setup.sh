@@ -49,6 +49,25 @@ DARKREEL_URL=""
 
 read -rp "Domain name for PPVDA (e.g., download.example.com), or leave empty for no TLS: " DOMAIN
 
+if [ -n "$DOMAIN" ]; then
+  SERVER_IP=$(curl -sf https://ifconfig.me || curl -sf https://api.ipify.org || echo "")
+  if [ -n "$SERVER_IP" ]; then
+    DOMAIN_IP=$(dig +short "$DOMAIN" 2>/dev/null | tail -1)
+    if [ -z "$DOMAIN_IP" ]; then
+      warn "Could not resolve $DOMAIN. Make sure the DNS A record points to $SERVER_IP"
+      read -rp "Continue anyway? [y/N]: " confirm
+      [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && exit 1
+    elif [ "$DOMAIN_IP" != "$SERVER_IP" ]; then
+      warn "$DOMAIN resolves to $DOMAIN_IP but this server is $SERVER_IP"
+      warn "Caddy will fail to get a TLS certificate unless DNS points here."
+      read -rp "Continue anyway? [y/N]: " confirm
+      [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && exit 1
+    else
+      info "DNS check passed: $DOMAIN -> $SERVER_IP"
+    fi
+  fi
+fi
+
 read -rp "Admin username [admin]: " input
 ADMIN_USER="${input:-admin}"
 
