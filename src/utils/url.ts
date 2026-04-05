@@ -1,8 +1,10 @@
 import { lookup } from 'node:dns/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 
 /**
  * Checks if a URL targets a private/reserved IP range.
  * Validates both the literal hostname and the resolved IP.
+ * Resolves DNS twice to detect DNS rebinding attacks.
  * Prevents SSRF attacks against internal network services.
  */
 export async function isPrivateUrl(url: string): Promise<boolean> {
@@ -14,12 +16,27 @@ export async function isPrivateUrl(url: string): Promise<boolean> {
     if (isPrivateHostname(hostname)) return true;
 
     // Resolve DNS and check the resulting IP
+    let firstAddress: string;
     try {
-      const { address } = await lookup(hostname);
-      if (isPrivateIP(address)) return true;
+      const result = await lookup(hostname);
+      firstAddress = result.address;
     } catch {
-      // DNS resolution failed — allow the request to proceed
-      // (ffmpeg/Chromium will fail with a clear error)
+      // DNS resolution failed — reject (fail closed)
+      return true;
+    }
+
+    if (isPrivateIP(firstAddress)) return true;
+
+    // Re-resolve after a short delay to detect DNS rebinding.
+    // A rebinding attack flips a public IP to a private one between lookups.
+    // Different public IPs (CDN round-robin) are normal and allowed.
+    await delay(100);
+
+    try {
+      const result2 = await lookup(hostname);
+      if (isPrivateIP(result2.address)) return true;
+    } catch {
+      return true;
     }
 
     return false;
@@ -34,7 +51,10 @@ function isPrivateHostname(hostname: string): boolean {
     lower === 'localhost' ||
     lower.endsWith('.local') ||
     lower.endsWith('.internal') ||
-    lower === '[::1]'
+    lower === '[::1]' ||
+    lower === '[::]' ||
+    lower === '::1' ||
+    lower === '::'
   );
 }
 
@@ -49,9 +69,13 @@ function isPrivateIP(ip: string): boolean {
   if (/^100\.(6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./.test(ip)) return true; // CGNAT
 
   // IPv6 private/reserved
-  if (ip === '::1') return true;                               // loopback
-  if (/^f[cd]/i.test(ip)) return true;                         // unique local
+  if (ip === '::1' || ip === '::') return true;                // loopback / all-zeros
+  if (/^f[cd]/i.test(ip)) return true;                         // unique local (fc00::/fd00::)
   if (/^fe80:/i.test(ip)) return true;                         // link-local
+
+  // IPv4-mapped IPv6 (::ffff:x.x.x.x)
+  const v4mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  if (v4mapped) return isPrivateIP(v4mapped[1]);
 
   return false;
 }

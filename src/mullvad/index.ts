@@ -1,11 +1,9 @@
 import { generateWireGuardKeys } from './keys.js';
-import { getAccessToken, createDevice, removeDevice, getRelayList, findRelay } from './api.js';
+import { getAccessToken, createDevice, removeDevice, listDevices, getRelayList, findRelay } from './api.js';
 import {
   generateWgConfig,
   startTunnel,
   stopTunnel,
-  saveDeviceInfo,
-  loadDeviceInfo,
   getDefaultGateway,
   resolveBypassHost,
   addRouteExceptions,
@@ -29,10 +27,9 @@ let switching = false;
  * Set up a Mullvad VPN connection via WireGuard.
  *
  * Flow:
- * 1. Check for a cached device (from a previous run)
- * 2. If no cached device, generate keys and register with Mullvad
- * 3. Fetch relay list and pick a server matching the requested location
- * 4. Generate WireGuard config and bring up the tunnel
+ * 1. Generate fresh WireGuard keys and register with Mullvad
+ * 2. Fetch relay list and pick a server matching the requested location
+ * 3. Generate WireGuard config and bring up the tunnel
  */
 export async function setupMullvad(
   config: MullvadConfig,
@@ -41,21 +38,31 @@ export async function setupMullvad(
 ): Promise<void> {
   activeConfig = config;
 
-  // Try to reuse a previously registered device
-  let device = await loadDeviceInfo(config.configDir);
+  // Always generate fresh keys on startup
+  logger.info('Registering new Mullvad device...');
+  const token = await getAccessToken(config.accountNumber);
+  const keys = generateWireGuardKeys();
 
-  if (device) {
-    logger.info('Reusing cached Mullvad device');
-  } else {
-    logger.info('Registering new Mullvad device...');
-
-    const token = await getAccessToken(config.accountNumber);
-    const keys = generateWireGuardKeys();
+  let device: DeviceInfo;
+  try {
     device = await createDevice(token, keys);
-
-    await saveDeviceInfo(config.configDir, device);
-    logger.info('Mullvad device registered');
+  } catch (err) {
+    // If max devices reached, remove the oldest and retry
+    if (err instanceof Error && err.message.includes('MAX_DEVICES_REACHED')) {
+      logger.warn('Max Mullvad devices reached, removing oldest device...');
+      const devices = await listDevices(token);
+      if (devices.length > 0) {
+        const oldest = devices.sort((a, b) => new Date(a.created).getTime() - new Date(b.created).getTime())[0];
+        await removeDevice(token, oldest.id);
+        logger.info({ removedDevice: oldest.name }, 'Removed oldest Mullvad device');
+      }
+      device = await createDevice(token, keys);
+    } else {
+      throw err;
+    }
   }
+
+  logger.info('Mullvad device registered');
 
   activeDevice = device;
 
@@ -96,26 +103,26 @@ export async function setupMullvad(
 
 /**
  * Tear down the Mullvad VPN connection.
- * Optionally removes the device from the Mullvad account.
+ * Deregisters the device from the Mullvad account before stopping the tunnel.
  */
 export async function teardownMullvad(
   logger: Logger,
-  opts: { removeDevice: boolean } = { removeDevice: false },
 ): Promise<void> {
   if (!activeConfig) return;
 
-  await stopTunnel(activeConfig.configDir);
-  logger.info('WireGuard tunnel stopped');
-
-  if (opts.removeDevice && activeDevice && activeConfig) {
+  // Deregister device before stopping tunnel
+  if (activeDevice) {
     try {
       const token = await getAccessToken(activeConfig.accountNumber);
       await removeDevice(token, activeDevice.id);
-      logger.info('Mullvad device removed');
+      logger.info('Mullvad device deregistered');
     } catch {
-      logger.warn('Failed to remove Mullvad device (non-fatal)');
+      logger.warn('Failed to deregister Mullvad device (non-fatal)');
     }
   }
+
+  await stopTunnel(activeConfig.configDir);
+  logger.info('WireGuard tunnel stopped');
 
   activeDevice = null;
   activeConfig = null;

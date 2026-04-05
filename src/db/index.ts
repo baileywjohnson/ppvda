@@ -10,6 +10,7 @@ export interface UserRow {
   password_salt: Buffer;
   encrypted_master_key: Buffer;
   master_key_nonce: Buffer;
+  kdf_iterations: number;
   is_admin: number;
   created_at: string;
 }
@@ -41,10 +42,20 @@ export class DB {
         password_salt BLOB NOT NULL,
         encrypted_master_key BLOB NOT NULL,
         master_key_nonce BLOB NOT NULL,
+        kdf_iterations INTEGER NOT NULL DEFAULT 100000,
         is_admin INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+    `);
 
+    // Add kdf_iterations column for existing databases
+    try {
+      this.db.exec(`ALTER TABLE users ADD COLUMN kdf_iterations INTEGER NOT NULL DEFAULT 100000`);
+    } catch {
+      // Column already exists
+    }
+
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS darkreel_creds (
         user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
         encrypted_data BLOB NOT NULL,
@@ -83,20 +94,28 @@ export class DB {
     encryptedMasterKey: Buffer;
     masterKeyNonce: Buffer;
     isAdmin: boolean;
+    kdfIterations?: number;
   }): string {
     const id = randomUUID();
     this.db.prepare(`
-      INSERT INTO users (id, username, password_hash, password_salt, encrypted_master_key, master_key_nonce, is_admin)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, opts.username, opts.passwordHash, opts.passwordSalt, opts.encryptedMasterKey, opts.masterKeyNonce, opts.isAdmin ? 1 : 0);
+      INSERT INTO users (id, username, password_hash, password_salt, encrypted_master_key, master_key_nonce, kdf_iterations, is_admin)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, opts.username, opts.passwordHash, opts.passwordSalt, opts.encryptedMasterKey, opts.masterKeyNonce, opts.kdfIterations ?? 600000, opts.isAdmin ? 1 : 0);
     return id;
   }
 
-  updateUserPassword(userId: string, passwordHash: string, passwordSalt: Buffer, encryptedMasterKey: Buffer, masterKeyNonce: Buffer) {
+  updateUserPassword(userId: string, passwordHash: string, passwordSalt: Buffer, encryptedMasterKey: Buffer, masterKeyNonce: Buffer, kdfIterations?: number) {
     this.db.prepare(`
-      UPDATE users SET password_hash = ?, password_salt = ?, encrypted_master_key = ?, master_key_nonce = ?
+      UPDATE users SET password_hash = ?, password_salt = ?, encrypted_master_key = ?, master_key_nonce = ?, kdf_iterations = ?
       WHERE id = ?
-    `).run(passwordHash, passwordSalt, encryptedMasterKey, masterKeyNonce, userId);
+    `).run(passwordHash, passwordSalt, encryptedMasterKey, masterKeyNonce, kdfIterations ?? 600000, userId);
+  }
+
+  updateUserKdf(userId: string, passwordSalt: Buffer, encryptedMasterKey: Buffer, masterKeyNonce: Buffer, kdfIterations: number) {
+    this.db.prepare(`
+      UPDATE users SET password_salt = ?, encrypted_master_key = ?, master_key_nonce = ?, kdf_iterations = ?
+      WHERE id = ?
+    `).run(passwordSalt, encryptedMasterKey, masterKeyNonce, kdfIterations, userId);
   }
 
   deleteUser(userId: string): boolean {

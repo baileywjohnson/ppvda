@@ -17,6 +17,9 @@ export async function jobRoutes(app: FastifyInstance, opts: JobsRouteOpts) {
     '/jobs',
     {
       schema: { body: createJobRequestSchema, response: { 202: jobResponseSchema } },
+      config: {
+        rateLimit: { max: 10, timeWindow: '1 minute' },
+      },
       preHandler: [preHandler],
     },
     async (request, reply) => {

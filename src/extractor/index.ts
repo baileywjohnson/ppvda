@@ -55,6 +55,31 @@ const STEALTH_SCRIPT = `
   };
 `;
 
+const MAX_CONCURRENT_EXTRACTIONS = 3;
+
+class ExtractionSemaphore {
+  private running = 0;
+  private queue: Array<() => void> = [];
+
+  async acquire(): Promise<void> {
+    if (this.running < MAX_CONCURRENT_EXTRACTIONS) {
+      this.running++;
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.queue.push(() => { this.running++; resolve(); });
+    });
+  }
+
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+
+const extractionSem = new ExtractionSemaphore();
+
 let browserInstance: Browser | null = null;
 let currentProxyRaw: string | undefined;
 
@@ -100,6 +125,17 @@ export async function closeBrowser(): Promise<void> {
 }
 
 export async function extractVideos(
+  options: ExtractOptions & { proxy?: ProxyConfig },
+): Promise<ExtractionResult> {
+  await extractionSem.acquire();
+  try {
+    return await extractVideosInternal(options);
+  } finally {
+    extractionSem.release();
+  }
+}
+
+async function extractVideosInternal(
   options: ExtractOptions & { proxy?: ProxyConfig },
 ): Promise<ExtractionResult> {
   const timeoutMs = options.timeoutMs ?? 30000;
@@ -179,6 +215,22 @@ export async function extractVideos(
  * with the network idle wait.
  */
 export async function extractVideosStreaming(
+  options: ExtractOptions & {
+    proxy?: ProxyConfig;
+    onVideo: (video: VideoSource) => void;
+    onDone: (result: ExtractionResult) => void;
+    onError: (error: Error) => void;
+  },
+): Promise<void> {
+  await extractionSem.acquire();
+  try {
+    await extractVideosStreamingInternal(options);
+  } finally {
+    extractionSem.release();
+  }
+}
+
+async function extractVideosStreamingInternal(
   options: ExtractOptions & {
     proxy?: ProxyConfig;
     onVideo: (video: VideoSource) => void;

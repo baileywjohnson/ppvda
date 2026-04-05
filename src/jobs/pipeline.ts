@@ -9,6 +9,7 @@ import { downloadVideo, selectBestVideo } from '../downloader/index.js';
 import { classifyUrl } from '../extractor/patterns.js';
 import { uploadToDarkreel } from '../hooks/darkreel.js';
 import { isVpnSwitching } from '../mullvad/index.js';
+import { isPrivateUrl } from '../utils/url.js';
 import { resolveProxy, type VpnPermissionStore } from '../server/vpn-permissions.js';
 import { getUserDarkreelCreds } from '../server/routes/settings.js';
 import type { VideoType, MediaType } from '../extractor/types.js';
@@ -104,6 +105,14 @@ async function processJob(
     store.update(jobId, { status: 'failed', error: 'VPN is switching countries, try again in a moment' });
     return;
   }
+
+  // SSRF validation
+  const urlToCheck = input.videoUrl ?? input.url;
+  if (urlToCheck && await isPrivateUrl(urlToCheck)) {
+    store.update(jobId, { status: 'failed', error: 'Private/internal URLs are not allowed' });
+    return;
+  }
+
   let targetUrl: string;
   let targetType: MediaType;
 

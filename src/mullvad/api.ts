@@ -68,6 +68,25 @@ export async function createDevice(
 }
 
 /**
+ * List all devices on the Mullvad account.
+ */
+export async function listDevices(token: string): Promise<Array<{ id: string; name: string; pubkey: string; created: string }>> {
+  const res = await fetch(`${API_BASE}/accounts/v1/devices`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Mullvad device list failed (${res.status}): ${body}`);
+  }
+
+  return (await res.json()) as Array<{ id: string; name: string; pubkey: string; created: string }>;
+}
+
+/**
  * Remove a device from the Mullvad account.
  */
 export async function removeDevice(token: string, deviceId: string): Promise<void> {

@@ -1,6 +1,6 @@
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync, timingSafeEqual, scryptSync } from 'node:crypto';
 
-const PBKDF2_ITERATIONS = 100_000;
+export const PBKDF2_ITERATIONS = 600_000;
 const PBKDF2_KEY_LEN = 32;
 const PBKDF2_DIGEST = 'sha256';
 const AES_ALGO = 'aes-256-gcm';
@@ -20,8 +20,8 @@ export function generateSalt(): Buffer {
   return randomBytes(SALT_LEN);
 }
 
-export function deriveKeyFromPassword(password: string, salt: Buffer): Buffer {
-  return pbkdf2Sync(password, salt, PBKDF2_ITERATIONS, PBKDF2_KEY_LEN, PBKDF2_DIGEST);
+export function deriveKeyFromPassword(password: string, salt: Buffer, iterations?: number): Buffer {
+  return pbkdf2Sync(password, salt, iterations ?? PBKDF2_ITERATIONS, PBKDF2_KEY_LEN, PBKDF2_DIGEST);
 }
 
 // --- AES-256-GCM encryption ---

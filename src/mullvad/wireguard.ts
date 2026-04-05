@@ -1,4 +1,4 @@
-import { writeFile, readFile, unlink } from 'node:fs/promises';
+import { writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -129,24 +129,3 @@ export async function addRouteExceptions(
   }
 }
 
-/**
- * Save device info to disk so it can be reused across restarts.
- */
-export async function saveDeviceInfo(configDir: string, device: DeviceInfo): Promise<void> {
-  await ensureDir(configDir);
-  const path = join(configDir, 'device.json');
-  await writeFile(path, JSON.stringify(device, null, 2), { mode: 0o600 });
-}
-
-/**
- * Load previously saved device info, if it exists.
- */
-export async function loadDeviceInfo(configDir: string): Promise<DeviceInfo | null> {
-  const path = join(configDir, 'device.json');
-  try {
-    const data = await readFile(path, 'utf-8');
-    return JSON.parse(data) as DeviceInfo;
-  } catch {
-    return null;
-  }
-}

@@ -8,6 +8,7 @@ import {
   deriveKeyFromPassword, generateSalt,
   encrypt, decrypt, generateMasterKey,
   zeroBuffer, isStrongPassword, PASSWORD_REQUIREMENTS,
+  PBKDF2_ITERATIONS,
 } from '../crypto/index.js';
 
 interface AuthOpts {
@@ -60,8 +61,7 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
     const auth = request.headers.authorization;
     if (auth?.startsWith('Bearer ')) return auth.slice(7);
 
-    // Query param fallback (SSE/EventSource)
-    return (request.query as Record<string, string>)?.token;
+    return undefined;
   }
 
   // --- Auth preHandler ---
@@ -139,8 +139,9 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
         return;
       }
 
-      // Derive user key and decrypt master key
-      const userKey = deriveKeyFromPassword(password, user.password_salt);
+      // Derive user key using stored iteration count and decrypt master key
+      const storedIterations = user.kdf_iterations ?? 100_000;
+      const userKey = deriveKeyFromPassword(password, user.password_salt, storedIterations);
       let masterKey: Buffer;
       try {
         masterKey = decrypt(user.encrypted_master_key, user.master_key_nonce, userKey);
@@ -150,6 +151,15 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
         return;
       }
       zeroBuffer(userKey);
+
+      // Transparently upgrade KDF iterations if below current target
+      if (storedIterations < PBKDF2_ITERATIONS) {
+        const newSalt = generateSalt();
+        const newUserKey = deriveKeyFromPassword(password, newSalt, PBKDF2_ITERATIONS);
+        const { ciphertext: newEncMasterKey, nonce: newNonce } = encrypt(masterKey, newUserKey);
+        zeroBuffer(newUserKey);
+        db.updateUserKdf(user.id, newSalt, newEncMasterKey, newNonce, PBKDF2_ITERATIONS);
+      }
 
       // Store master key in session
       sessions.set(user.id, masterKey);
@@ -255,7 +265,7 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
       const { ciphertext: newEncMasterKey, nonce: newMasterKeyNonce } = encrypt(masterKey, newUserKey);
       zeroBuffer(newUserKey);
 
-      db.updateUserPassword(userId, newPasswordHash, newSalt, newEncMasterKey, newMasterKeyNonce);
+      db.updateUserPassword(userId, newPasswordHash, newSalt, newEncMasterKey, newMasterKeyNonce, PBKDF2_ITERATIONS);
 
       reply.send({ success: true });
     },
