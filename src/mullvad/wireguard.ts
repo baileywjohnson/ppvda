@@ -64,6 +64,15 @@ export async function stopTunnel(configDir: string): Promise<void> {
     // Tunnel may not be up — ignore
   }
 
+  // Restore Docker's default DNS resolver. startTunnel() overwrites
+  // /etc/resolv.conf with Mullvad's DNS (10.64.0.1) which becomes
+  // unreachable once the tunnel is down, breaking all DNS lookups.
+  try {
+    await writeFile('/etc/resolv.conf', 'nameserver 127.0.0.11\n', { mode: 0o644 });
+  } catch {
+    // Non-fatal
+  }
+
   await unlink(configPath).catch(() => {});
 }
 
