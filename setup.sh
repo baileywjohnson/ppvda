@@ -188,6 +188,89 @@ if grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config 2>/dev/null || grep -q "^
 fi
 
 # ============================================================
+# DEPLOY USER & CI/CD
+# ============================================================
+
+# --- Create deploy user (for CI/CD) ---
+if ! id -u deploy &>/dev/null; then
+  useradd -m -s /bin/bash deploy
+  info "Created deploy user"
+else
+  info "Deploy user already exists"
+fi
+
+# Create the deploy script (the ONLY thing deploy can sudo).
+# Accepts a commit SHA as argument, verifies its Ed25519 signature
+# against the public key at /etc/ppvda/signing.pub, then checks out
+# that exact commit and rebuilds. Without a valid signature, the
+# deploy is rejected — even if GitHub Actions is compromised.
+cat > /usr/local/bin/ppvda-deploy << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+COMMIT_SHA="${1:-}"
+REPO_DIR="/opt/ppvda"
+SIGNING_PUB="/etc/ppvda/signing.pub"
+HASH_FILE="/home/deploy/commit.hash"
+SIG_FILE="/home/deploy/commit.sig"
+
+if [ -z "$COMMIT_SHA" ]; then
+  echo "Usage: ppvda-deploy <commit-sha>" >&2
+  exit 1
+fi
+
+# Verify Ed25519 signature if signing key is installed
+if [ -f "$SIGNING_PUB" ]; then
+  if [ ! -f "$SIG_FILE" ] || [ ! -f "$HASH_FILE" ]; then
+    echo "ERROR: commit.hash and commit.sig must be in /home/deploy/" >&2
+    exit 1
+  fi
+
+  # Verify the signature matches the commit SHA
+  EXPECTED_SHA=$(cat "$HASH_FILE" | tr -d '[:space:]')
+  if [ "$EXPECTED_SHA" != "$COMMIT_SHA" ]; then
+    echo "ERROR: commit hash mismatch" >&2
+    exit 1
+  fi
+
+  openssl pkeyutl -verify -pubin \
+    -inkey "$SIGNING_PUB" \
+    -rawin -in "$HASH_FILE" -sigfile "$SIG_FILE" || {
+    echo "ERROR: signature verification failed — deploy rejected" >&2
+    exit 1
+  }
+  echo "Signature verified for commit $COMMIT_SHA"
+else
+  echo "WARNING: no signing key at $SIGNING_PUB — skipping signature verification" >&2
+fi
+
+# Clean up signature files
+rm -f "$HASH_FILE" "$SIG_FILE"
+
+# Fetch and checkout the verified commit
+cd "$REPO_DIR"
+git fetch --quiet origin
+git checkout --quiet "$COMMIT_SHA"
+docker compose up --build -d
+SCRIPT
+chmod 755 /usr/local/bin/ppvda-deploy
+
+# Restricted sudo — deploy can ONLY run this one script
+echo 'deploy ALL=(ALL) NOPASSWD: /usr/local/bin/ppvda-deploy' > /etc/sudoers.d/deploy
+chmod 440 /etc/sudoers.d/deploy
+info "Deploy script installed with restricted sudo"
+
+# --- Install signing public key directory ---
+mkdir -p /etc/ppvda
+if [ ! -f /etc/ppvda/signing.pub ]; then
+  warn "No signing public key found at /etc/ppvda/signing.pub"
+  warn "CI/CD signature verification will be skipped without it."
+  warn "Copy your signing public key to the VPS:"
+  warn "  scp ppvda_signing.pub youruser@server:/etc/ppvda/signing.pub"
+  echo ""
+fi
+
+# ============================================================
 # DOCKER & PPVDA INSTALLATION
 # ============================================================
 

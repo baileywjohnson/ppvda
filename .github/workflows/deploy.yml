@@ -2,32 +2,52 @@ name: Deploy
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sign commit
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          # Hash the commit SHA and sign it — key passed via fd, never written to disk
+          COMMIT_SHA="${{ github.sha }}"
+          printf '%s' "$COMMIT_SHA" > commit.hash
+          openssl pkeyutl -sign -inkey <(printf '%s' "$SIGNING_KEY") \
+            -rawin -in commit.hash -out commit.sig
+
+          echo "Signed commit: $COMMIT_SHA"
+
       - name: Deploy to VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_DEPLOY_KEY: ${{ secrets.VPS_DEPLOY_KEY }}
+          SSH_KEY: ${{ secrets.VPS_DEPLOY_KEY }}
           VPS_HOST_KEY: ${{ secrets.VPS_HOST_KEY }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          # Set up SSH
+          # Set up SSH with strict host key verification
           mkdir -p ~/.ssh
-          printf '%s\n' "$VPS_HOST_KEY" > ~/.ssh/known_hosts
-          printf '%s\n' "$VPS_DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          SSH_OPTS="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -i ~/.ssh/deploy_key"
 
-          # Deploy: pull latest code and rebuild container
-          ssh -i ~/.ssh/deploy_key "deploy@${VPS_HOST}" \
-            'sudo /usr/local/bin/ppvda-deploy'
+          # Copy commit hash and signature to VPS
+          scp $SSH_OPTS commit.hash commit.sig deploy@"$VPS_HOST":~/
+
+          # Verify signature and deploy
+          ssh $SSH_OPTS deploy@"$VPS_HOST" "sudo /usr/local/bin/ppvda-deploy $COMMIT_SHA"
 
           # Health check
           sleep 10
-          ssh -i ~/.ssh/deploy_key "deploy@${VPS_HOST}" \
+          ssh $SSH_OPTS deploy@"$VPS_HOST" \
             'curl -sf http://localhost:3000/health || echo "WARNING: health check failed"'
 
           # Clean up
