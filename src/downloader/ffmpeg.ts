@@ -24,6 +24,17 @@ export interface FfmpegResult {
 export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
   const { inputUrl, outputPath, ffmpegPath, proxyConfig, timeoutMs = 300000 } = options;
 
+  // Block non-HTTP protocols to prevent file://, gopher://, concat: etc.
+  try {
+    const protocol = new URL(inputUrl).protocol;
+    if (protocol !== 'http:' && protocol !== 'https:') {
+      throw new FfmpegError('Only http/https URLs are supported by ffmpeg', 'INVALID_PROTOCOL');
+    }
+  } catch (err) {
+    if (err instanceof FfmpegError) throw err;
+    throw new FfmpegError('Invalid input URL', 'INVALID_URL');
+  }
+
   const args = [
     '-y',                    // overwrite output
     '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',

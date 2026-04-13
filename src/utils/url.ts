@@ -30,7 +30,7 @@ export async function isPrivateUrl(url: string): Promise<boolean> {
     // Re-resolve after a short delay to detect DNS rebinding.
     // A rebinding attack flips a public IP to a private one between lookups.
     // Different public IPs (CDN round-robin) are normal and allowed.
-    await delay(100);
+    await delay(500);
 
     try {
       const result2 = await lookup(hostname);

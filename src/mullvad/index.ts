@@ -88,6 +88,9 @@ export async function setupMullvad(
   const relays = await getRelayList();
   const { server } = findRelay(relays, config.location);
 
+  // Ensure no stale tunnel from a previous crash/SIGKILL before starting
+  try { await stopTunnel(config.configDir); } catch { /* may not exist — fine */ }
+
   // Generate config and start tunnel
   const wgConfig = generateWgConfig(device, server);
   await startTunnel(config.configDir, wgConfig);

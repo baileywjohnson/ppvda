@@ -100,6 +100,11 @@ export async function downloadRoutes(
         targetType = best.type as MediaType;
       }
 
+      // SSRF: validate the resolved video URL (may differ from the page URL)
+      if (await isPrivateUrl(targetUrl)) {
+        throw new ExtractionError('Extracted video URL targets a private address', 'PRIVATE_URL_BLOCKED');
+      }
+
       const result = await downloadVideo({
         url: targetUrl,
         type: targetType,

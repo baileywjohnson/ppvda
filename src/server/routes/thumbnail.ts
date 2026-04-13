@@ -92,10 +92,24 @@ async function handleImageProxy(
       return;
     }
 
+    // Reject oversized responses to prevent OOM (10 MB limit)
+    const contentLength = parseInt(res.headers.get('content-length') ?? '0', 10);
+    if (contentLength > 10 * 1024 * 1024) {
+      reply.status(413).send({ success: false, error: 'Image too large' });
+      return;
+    }
+
     const contentType = res.headers.get('content-type') ?? 'image/jpeg';
+    const maxBytes = 10 * 1024 * 1024;
     const chunks: Buffer[] = [];
+    let totalBytes = 0;
     // @ts-ignore
     for await (const chunk of res.body) {
+      totalBytes += chunk.length;
+      if (totalBytes > maxBytes) {
+        reply.status(413).send({ success: false, error: 'Image too large' });
+        return;
+      }
       chunks.push(Buffer.from(chunk));
     }
     const data = Buffer.concat(chunks);
@@ -119,6 +133,12 @@ async function handleVideoThumbnail(
   request: any,
   reply: any,
 ) {
+  // Validate seekTime is a non-negative number to prevent unexpected ffmpeg behavior
+  if (!/^\d+(\.\d+)?$/.test(seekTime)) {
+    reply.status(400).send({ success: false, error: 'Invalid seek time — must be a non-negative number' });
+    return;
+  }
+
   const { proc, stdout, kill } = spawnFfmpegStream({
     inputUrl: videoUrl,
     ffmpegPath: opts.ffmpegPath,

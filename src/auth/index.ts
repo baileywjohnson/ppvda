@@ -205,7 +205,7 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
         return;
       }
       if (db.getUserByUsername(username)) {
-        reply.status(409).send({ success: false, error: 'Registration failed.' });
+        reply.status(400).send({ success: false, error: 'Registration failed.' });
         return;
       }
 

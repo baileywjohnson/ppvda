@@ -26,6 +26,14 @@ export async function probeVideo(options: {
     timeoutMs = 10000,
   } = options;
 
+  // Block non-HTTP protocols to prevent file://, gopher://, concat: etc.
+  try {
+    const protocol = new URL(url).protocol;
+    if (protocol !== 'http:' && protocol !== 'https:') return {};
+  } catch {
+    return {};
+  }
+
   const args = [
     '-v', 'quiet',
     '-print_format', 'json',

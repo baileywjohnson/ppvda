@@ -154,6 +154,13 @@ async function processJob(
 
       targetUrl = best.url;
       targetType = best.type as MediaType;
+
+      // SSRF: validate the resolved video URL (may differ from the page URL)
+      if (await isPrivateUrl(targetUrl)) {
+        store.update(jobId, { status: 'failed', error: 'Extracted video URL targets a private address' });
+        return;
+      }
+
       store.update(jobId, { status: 'downloading', videoType: best.type });
     } catch (err) {
       logger.error({ jobId }, 'Extraction failed');

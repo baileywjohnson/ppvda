@@ -105,6 +105,11 @@ export function interceptNetworkRequests(
       return;
     }
 
+    // Start idle timer on first response (deferred from setup to avoid navigation race)
+    if (!idleTimer && !stopped) {
+      resetIdle();
+    }
+
     const match = classifyUrl(url, contentType, { includeImages: options.includeImages });
     if (match && !found.has(url) && !isAdDomain(url)) {
       // For images intercepted via network, skip tiny responses (likely icons/favicons)
@@ -132,8 +137,10 @@ export function interceptNetworkRequests(
 
   page.on('response', onResponse);
 
-  // Start the idle timer immediately (in case page has no network activity)
-  resetIdle();
+  // Don't start the idle timer until the first response arrives.
+  // The overall timeout (line above) handles the case of zero network activity.
+  // Starting idle immediately would race against page.goto() and resolve with
+  // empty results if navigation takes longer than networkIdleMs.
 
   function stop() {
     clearTimeout(overallTimeout);

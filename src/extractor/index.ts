@@ -55,7 +55,7 @@ const STEALTH_SCRIPT = `
   };
 `;
 
-const MAX_CONCURRENT_EXTRACTIONS = 3;
+const MAX_CONCURRENT_EXTRACTIONS = parseInt(process.env.MAX_CONCURRENT_EXTRACTIONS ?? '3', 10);
 
 class ExtractionSemaphore {
   private running = 0;

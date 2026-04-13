@@ -43,6 +43,8 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
     reply.header('X-Frame-Options', 'DENY');
     reply.header('Referrer-Policy', 'no-referrer');
     reply.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'");
+    reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    reply.header('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
   });
 
   // Global rate limit: 100 requests per minute per IP

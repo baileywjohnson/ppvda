@@ -98,6 +98,10 @@ export class DB {
         value TEXT NOT NULL
       );
     `);
+
+    // Performance: index on username for login lookups
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)`);
+
   }
 
   close() {

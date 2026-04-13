@@ -168,12 +168,12 @@ export function isValidUsername(u: string): boolean {
 
 // --- Convenience: encrypt/decrypt JSON ---
 
-export function encryptJSON(data: unknown, key: Buffer): { ciphertext: Buffer; nonce: Buffer } {
-  return encrypt(Buffer.from(JSON.stringify(data), 'utf-8'), key);
+export function encryptJSON(data: unknown, key: Buffer, aad?: Buffer): { ciphertext: Buffer; nonce: Buffer } {
+  return encrypt(Buffer.from(JSON.stringify(data), 'utf-8'), key, aad);
 }
 
-export function decryptJSON<T = unknown>(ciphertext: Buffer, nonce: Buffer, key: Buffer): T {
-  const plain = decrypt(ciphertext, nonce, key);
+export function decryptJSON<T = unknown>(ciphertext: Buffer, nonce: Buffer, key: Buffer, aad?: Buffer): T {
+  const plain = decrypt(ciphertext, nonce, key, aad);
   return JSON.parse(plain.toString('utf-8')) as T;
 }
 

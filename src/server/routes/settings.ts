@@ -56,6 +56,7 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username, password }),
+          signal: AbortSignal.timeout(10000),
         });
         if (!testRes.ok) {
           const text = await testRes.text().catch(() => '');
@@ -73,11 +74,16 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
         return;
       }
 
-      const creds: DarkreelCreds = { server, username, password };
-      const { ciphertext, nonce } = encryptJSON(creds, masterKey);
+      try {
+        const userIdBytes = Buffer.from(userId, 'utf-8');
+        const creds: DarkreelCreds = { server, username, password };
+        const { ciphertext, nonce } = encryptJSON(creds, masterKey, userIdBytes);
 
-      db.saveDarkreelCreds(userId, ciphertext, nonce);
-      reply.send({ success: true });
+        db.saveDarkreelCreds(userId, ciphertext, nonce);
+        reply.send({ success: true });
+      } finally {
+        zeroBuffer(masterKey);
+      }
     },
   );
 
@@ -101,11 +107,26 @@ export function getUserDarkreelCreds(db: DB, sessions: SessionStore, userId: str
   if (!masterKey) return null;
 
   const row = db.getDarkreelCreds(userId);
-  if (!row) return null;
+  if (!row) {
+    zeroBuffer(masterKey);
+    return null;
+  }
 
   try {
-    return decryptJSON<DarkreelCreds>(row.encrypted_data, row.nonce, masterKey);
+    const userIdBytes = Buffer.from(userId, 'utf-8');
+    // Try with AAD first (current format)
+    try {
+      return decryptJSON<DarkreelCreds>(row.encrypted_data, row.nonce, masterKey, userIdBytes);
+    } catch {
+      // Fall back to without AAD (legacy) and transparently re-encrypt with AAD
+      const result = decryptJSON<DarkreelCreds>(row.encrypted_data, row.nonce, masterKey);
+      const { ciphertext, nonce } = encryptJSON(result, masterKey, userIdBytes);
+      db.saveDarkreelCreds(userId, ciphertext, nonce);
+      return result;
+    }
   } catch {
     return null;
+  } finally {
+    zeroBuffer(masterKey);
   }
 }
