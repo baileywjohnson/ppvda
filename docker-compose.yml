@@ -3,21 +3,8 @@ services:
     build: .
     ports:
       - "3000:3000"
-    environment:
-      - PROXY_URL=${PROXY_URL:-}
-      - MULLVAD_ACCOUNT=${MULLVAD_ACCOUNT:-}
-      - MULLVAD_LOCATION=${MULLVAD_LOCATION:-}
-      - VPN_BYPASS_HOSTS=${VPN_BYPASS_HOSTS:-}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      # Auth (PPVDA_ADMIN_PASSWORD required on first run)
-      - PPVDA_ADMIN_USERNAME=${PPVDA_ADMIN_USERNAME:-admin}
-      - PPVDA_ADMIN_PASSWORD=${PPVDA_ADMIN_PASSWORD:-}
-      - JWT_SECRET=${JWT_SECRET:-}
-      # Database
-      - DB_PATH=/app/data/ppvda.db
-      # Features
-      - ENABLE_THUMBNAILS=${ENABLE_THUMBNAILS:-true}
-      - MAX_CONCURRENT_DOWNLOADS=${MAX_CONCURRENT_DOWNLOADS:-3}
+    env_file:
+      - .env
     volumes:
       - ./downloads:/app/downloads
       - ./data:/app/data

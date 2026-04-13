@@ -3,12 +3,17 @@
 # PPVDA quickstart — sets up PPVDA on a fresh Linux VPS with Docker.
 #
 # What this script does:
-#   1. Installs Docker and Docker Compose (if not present)
-#   2. Clones the repo (or uses the current directory)
-#   3. Generates a secure .env configuration
-#   4. Optionally configures Mullvad VPN
-#   5. Sets up Caddy for automatic HTTPS
-#   6. Builds and starts everything with docker compose
+#   1. Applies system updates and installs security tooling
+#   2. Configures UFW firewall (SSH, HTTP, HTTPS only)
+#   3. Installs fail2ban and enables automatic security updates
+#   4. Optionally creates a personal SSH user and disables root login
+#   5. Installs Docker and Docker Compose (if not present)
+#   6. Clones the repo (or uses the current directory)
+#   7. Generates a secure .env configuration
+#   8. Optionally configures Mullvad VPN
+#   9. Sets up Caddy for automatic HTTPS (with optional access log privacy)
+#   10. Sets up daily encrypted database backups
+#   11. Builds and starts everything with docker compose
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/baileywjohnson/ppvda/main/setup.sh | bash
@@ -46,6 +51,8 @@ ADMIN_PASS=""
 MULLVAD_ACCOUNT=""
 MULLVAD_LOCATION=""
 DARKREEL_URL=""
+SSH_USER=""
+DISABLE_ACCESS_LOGS="y"
 
 read -rp "Domain name for PPVDA (e.g., download.example.com), or leave empty for no TLS: " DOMAIN
 
@@ -90,11 +97,99 @@ fi
 read -rp "Darkreel server URL (e.g., https://media.example.com), or leave empty: " DARKREEL_URL
 
 echo ""
+read -rp "Create a personal SSH user? Enter username (or leave empty to skip): " SSH_USER
+
+if [ -n "$DOMAIN" ]; then
+  echo ""
+  read -rp "Disable Caddy access logs for privacy? (recommended) [Y/n]: " DISABLE_ACCESS_LOGS_INPUT
+  [ "$DISABLE_ACCESS_LOGS_INPUT" = "n" ] || [ "$DISABLE_ACCESS_LOGS_INPUT" = "N" ] && DISABLE_ACCESS_LOGS="n"
+fi
+
+echo ""
 info "Admin user:  $ADMIN_USER"
 [ -n "$DOMAIN" ]           && info "Domain:      $DOMAIN"
 [ -n "$MULLVAD_ACCOUNT" ]  && info "Mullvad:     $MULLVAD_LOCATION"
 [ -n "$DARKREEL_URL" ]     && info "Darkreel:    $DARKREEL_URL"
+[ -n "$SSH_USER" ]         && info "SSH user:    $SSH_USER"
 echo ""
+
+# ============================================================
+# SYSTEM HARDENING
+# ============================================================
+
+# --- System updates ---
+info "Applying system updates..."
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq >/dev/null 2>&1
+info "System updated"
+
+# --- Install security packages ---
+info "Installing security packages..."
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fail2ban unattended-upgrades ufw >/dev/null
+info "fail2ban, unattended-upgrades, and UFW installed"
+
+# --- Enable unattended security updates ---
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+info "Automatic security updates enabled"
+
+# --- Configure fail2ban ---
+systemctl enable --now fail2ban >/dev/null 2>&1
+info "fail2ban enabled"
+
+# --- Firewall ---
+ufw --force reset >/dev/null 2>&1
+ufw default deny incoming >/dev/null 2>&1
+ufw default allow outgoing >/dev/null 2>&1
+ufw allow OpenSSH >/dev/null 2>&1
+ufw allow 80 >/dev/null 2>&1
+ufw allow 443 >/dev/null 2>&1
+ufw --force enable >/dev/null 2>&1
+info "UFW firewall enabled (SSH, HTTP, HTTPS only)"
+
+# --- Create personal SSH user ---
+if [ -n "$SSH_USER" ]; then
+  if ! id -u "$SSH_USER" &>/dev/null; then
+    useradd -m -s /bin/bash "$SSH_USER"
+    usermod -aG sudo "$SSH_USER"
+
+    # Copy root's SSH keys to the new user
+    if [ -f /root/.ssh/authorized_keys ]; then
+      mkdir -p "/home/${SSH_USER}/.ssh"
+      cp /root/.ssh/authorized_keys "/home/${SSH_USER}/.ssh/"
+      chown -R "${SSH_USER}:${SSH_USER}" "/home/${SSH_USER}/.ssh"
+      chmod 700 "/home/${SSH_USER}/.ssh"
+      chmod 600 "/home/${SSH_USER}/.ssh/authorized_keys"
+    fi
+
+    info "Created SSH user '$SSH_USER' with sudo access"
+    echo ""
+    warn "Set a password for $SSH_USER (needed for sudo):"
+    passwd "$SSH_USER"
+    echo ""
+  else
+    info "SSH user '$SSH_USER' already exists"
+  fi
+fi
+
+# --- Disable root SSH login ---
+if grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config 2>/dev/null || grep -q "^#PermitRootLogin" /etc/ssh/sshd_config 2>/dev/null; then
+  if [ -n "$SSH_USER" ]; then
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+    systemctl restart ssh
+    info "Root SSH login disabled"
+  else
+    warn "Skipping root SSH disable — no personal SSH user was created"
+    warn "Run this manually after setting up SSH access for another user:"
+    warn "  sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config && systemctl restart ssh"
+  fi
+fi
+
+# ============================================================
+# DOCKER & PPVDA INSTALLATION
+# ============================================================
 
 # --- Install Docker ---
 if ! command -v docker &>/dev/null; then
@@ -138,15 +233,16 @@ fi
 mkdir -p data downloads mullvad
 
 # --- Generate .env ---
+# The admin password goes to a separate file (deleted after first start)
+# to avoid leaving it in the long-lived .env.
 JWT_SECRET=$(openssl rand -hex 32)
 
 cat > .env <<EOF
 PORT=3000
 HOST=0.0.0.0
 
-# Admin (first run only)
+# Admin username (password is in bootstrap.env, deleted after first start)
 PPVDA_ADMIN_USERNAME=${ADMIN_USER}
-PPVDA_ADMIN_PASSWORD=${ADMIN_PASS}
 
 # Session secret (persistent across restarts)
 JWT_SECRET=${JWT_SECRET}
@@ -186,6 +282,12 @@ ALLOWED_HOSTS=
 PROXY_URL=
 EOF
 
+# Write admin password to a separate bootstrap file (deleted after first start).
+# This avoids leaving the plaintext password in the long-lived .env file.
+BOOTSTRAP_FILE="${REPO_DIR}/bootstrap.env"
+echo "PPVDA_ADMIN_PASSWORD=${ADMIN_PASS}" > "$BOOTSTRAP_FILE"
+chmod 600 "$BOOTSTRAP_FILE"
+
 # Add Mullvad config if provided
 if [ -n "$MULLVAD_ACCOUNT" ]; then
   cat >> .env <<EOF
@@ -205,9 +307,13 @@ EOF
   fi
 fi
 
-info ".env generated with secure JWT secret"
+chmod 600 .env
+info ".env generated with secure JWT secret (mode 600)"
 
-# --- Install and configure Caddy (if domain provided) ---
+# ============================================================
+# CADDY (REVERSE PROXY + TLS)
+# ============================================================
+
 if [ -n "$DOMAIN" ]; then
   if ! command -v caddy &>/dev/null; then
     info "Installing Caddy..."
@@ -220,21 +326,75 @@ if [ -n "$DOMAIN" ]; then
     info "Caddy installed"
   fi
 
-  cat > /etc/caddy/Caddyfile <<EOF
+  if [ "$DISABLE_ACCESS_LOGS" = "y" ]; then
+    cat > /etc/caddy/Caddyfile <<EOF
+${DOMAIN} {
+    reverse_proxy localhost:3000
+    log {
+        output discard
+    }
+}
+EOF
+    info "Caddy configured for $DOMAIN (HTTPS, access logs disabled for privacy)"
+  else
+    cat > /etc/caddy/Caddyfile <<EOF
 ${DOMAIN} {
     reverse_proxy localhost:3000
 }
 EOF
+    info "Caddy configured for $DOMAIN (HTTPS, access logs enabled)"
+  fi
   systemctl restart caddy
-  info "Caddy configured for https://$DOMAIN"
 fi
 
-# --- Build and start ---
+# ============================================================
+# DATABASE BACKUPS (daily, encrypted, 30-day retention)
+# ============================================================
+
+mkdir -p "${REPO_DIR}/backups"
+chmod 700 "${REPO_DIR}/backups"
+
+BACKUP_KEY_FILE="${REPO_DIR}/backup.key"
+if [ ! -f "$BACKUP_KEY_FILE" ]; then
+  openssl rand -hex 32 > "$BACKUP_KEY_FILE"
+  chmod 600 "$BACKUP_KEY_FILE"
+  info "Backup encryption key generated at $BACKUP_KEY_FILE"
+  warn "Back up this key separately — without it, encrypted backups cannot be restored."
+fi
+
+# Install sqlite3 for hot backups (small package, needed on host)
+if ! command -v sqlite3 &>/dev/null; then
+  apt-get install -y -qq sqlite3 >/dev/null
+fi
+
+cat > /etc/cron.d/ppvda-backup <<'CRONEOF'
+# Daily PPVDA database backup at 3 AM, encrypted, 30-day retention
+0 3 * * * root /bin/bash -c 'BACKUP_TMP=$(mktemp) && sqlite3 REPODIR/data/ppvda.db ".backup $BACKUP_TMP" && openssl enc -aes-256-cbc -salt -pbkdf2 -in "$BACKUP_TMP" -out "REPODIR/backups/ppvda-$(date +\%Y\%m\%d).db.enc" -pass file:REPODIR/backup.key && rm -f "$BACKUP_TMP" && find REPODIR/backups -name "ppvda-*.db.enc" -mtime +30 -delete'
+CRONEOF
+sed -i "s|REPODIR|${REPO_DIR}|g" /etc/cron.d/ppvda-backup
+info "Daily encrypted database backup configured (3 AM, 30-day retention)"
+
+# ============================================================
+# BUILD AND START
+# ============================================================
+
+# Merge bootstrap.env into docker compose environment
+# by adding it as an env_file in the compose override
+if [ -f "$BOOTSTRAP_FILE" ]; then
+  cat > docker-compose.override.yml <<EOF
+services:
+  ppvda:
+    env_file:
+      - .env
+      - bootstrap.env
+EOF
+fi
+
 info "Building and starting PPVDA (this takes a few minutes on first run)..."
 docker compose up --build -d
 
 info "Waiting for PPVDA to start..."
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
   if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
     break
   fi
@@ -242,6 +402,13 @@ for i in $(seq 1 30); do
 done
 
 if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
+  # Bootstrap succeeded — delete the one-time bootstrap file and override
+  if [ -f "$BOOTSTRAP_FILE" ]; then
+    shred -u "$BOOTSTRAP_FILE" 2>/dev/null || rm -f "$BOOTSTRAP_FILE"
+    rm -f docker-compose.override.yml
+    info "Bootstrap credentials removed (password stored as hash in DB)"
+  fi
+
   echo ""
   echo -e "${GREEN}${BOLD}PPVDA is running!${NC}"
   echo ""
@@ -252,6 +419,24 @@ if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
   fi
   echo -e "  ${BOLD}Username:${NC}  ${ADMIN_USER}"
   echo ""
+
+  # Read recovery code from the data directory
+  RC_FILE="${REPO_DIR}/data/admin-recovery-code.txt"
+  if [ -f "$RC_FILE" ]; then
+    RC=$(cat "$RC_FILE")
+    echo -e "  ${YELLOW}${BOLD}RECOVERY CODE:${NC}"
+    echo -e "  ${BOLD}${RC}${NC}"
+    echo ""
+    echo -e "  ${YELLOW}Save this code somewhere safe — it is the only way to regain${NC}"
+    echo -e "  ${YELLOW}access if you forget your password.${NC}"
+    echo ""
+
+    # Securely delete the recovery code file
+    shred -u "$RC_FILE" 2>/dev/null || rm -f "$RC_FILE"
+    info "Recovery code file deleted"
+    echo ""
+  fi
+
   if [ -n "$DARKREEL_URL" ]; then
     echo -e "  ${BOLD}Next step:${NC} Log in, go to Settings, and enter your Darkreel"
     echo -e "  credentials (${DARKREEL_URL}) to enable encrypted uploads."
@@ -261,11 +446,27 @@ if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
     echo -e "  configure it in Settings."
   fi
   echo ""
+  echo -e "  ${BOLD}What was set up:${NC}"
+  echo "    - System updates applied"
+  echo "    - UFW firewall (SSH, HTTP, HTTPS only)"
+  echo "    - fail2ban (auto-bans brute force SSH attempts)"
+  echo "    - Automatic security updates"
+  [ -n "$DOMAIN" ] && echo "    - Caddy reverse proxy with automatic TLS"
+  [ "$DISABLE_ACCESS_LOGS" = "y" ] && [ -n "$DOMAIN" ] && echo "    - Caddy access logs disabled for privacy"
+  echo "    - Daily encrypted database backups (${REPO_DIR}/backups/)"
+  [ -n "$MULLVAD_ACCOUNT" ] && echo "    - Mullvad VPN (${MULLVAD_LOCATION})"
+  [ -n "$SSH_USER" ] && echo "    - SSH user '$SSH_USER' with sudo access"
+  [ -n "$SSH_USER" ] && echo "    - Root SSH login disabled"
+  echo ""
   echo "  Useful commands:"
   echo "    docker compose logs -f        # follow logs"
   echo "    docker compose restart        # restart"
   echo "    docker compose down           # stop"
   echo "    docker compose up --build -d  # rebuild after updates"
+  [ -n "$SSH_USER" ] && echo "    ssh ${SSH_USER}@${SERVER_IP:-your-server}       # SSH in"
+  echo ""
+  echo -e "  ${BOLD}Backup key:${NC} ${REPO_DIR}/backup.key"
+  warn "Back up this key separately — encrypted backups cannot be restored without it."
   echo ""
 else
   warn "PPVDA may still be starting (Chromium install takes time)."
