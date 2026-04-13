@@ -117,6 +117,7 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
     return {
       enableThumbnails: config.enableThumbnails,
       darkreelConfigured: db.hasDarkreelCreds(userId),
+      registrationEnabled: db.getSetting('allow_registration') === 'true',
       isAdmin,
       userId,
       vpn: {

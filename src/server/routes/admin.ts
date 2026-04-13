@@ -2,7 +2,7 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import type { DB } from '../../db/index.js';
 import type { SessionStore } from '../../auth/sessions.js';
 import { createUser } from '../../auth/index.js';
-import { isStrongPassword, PASSWORD_REQUIREMENTS } from '../../crypto/index.js';
+import { isStrongPassword, isValidUsername, PASSWORD_REQUIREMENTS } from '../../crypto/index.js';
 import { getRelays, switchMullvadCountry, getVpnStatus } from '../../mullvad/index.js';
 import type { VpnPermissionStore } from '../vpn-permissions.js';
 
@@ -27,7 +27,7 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
     },
   );
 
-  // Create user
+  // Create user (each user gets independent master key + recovery code)
   app.post<{ Body: { username: string; password: string; isAdmin?: boolean } }>(
     '/admin/users',
     {
@@ -47,28 +47,29 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
     },
     async (request, reply) => {
       const { username, password, isAdmin } = request.body;
-      const adminUserId = (request as any).user.sub;
 
+      if (!isValidUsername(username)) {
+        reply.status(400).send({ success: false, error: 'Username must be 3-64 alphanumeric characters' });
+        return;
+      }
       if (!isStrongPassword(password)) {
         reply.status(400).send({ success: false, error: PASSWORD_REQUIREMENTS });
         return;
       }
-
-      // Check username availability
       if (db.getUserByUsername(username)) {
         reply.status(409).send({ success: false, error: 'Username already exists' });
         return;
       }
 
-      // Get master key from admin's session
-      const masterKey = sessions.get(adminUserId);
-      if (!masterKey) {
-        reply.status(401).send({ success: false, error: 'Session expired, please re-login' });
-        return;
-      }
-
-      const userId = createUser(db, masterKey, username, password, isAdmin ?? false);
-      reply.status(201).send({ success: true, data: { id: userId, username } });
+      const { userId, recoveryCode } = await createUser(db, username, password, isAdmin ?? false);
+      reply.status(201).send({
+        success: true,
+        data: {
+          id: userId,
+          username,
+          recovery_code: recoveryCode,
+        },
+      });
     },
   );
 
@@ -80,14 +81,12 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
       const { id } = request.params;
       const adminUserId = (request as any).user.sub;
 
-      // Prevent self-deletion
       if (id === adminUserId) {
         reply.status(400).send({ success: false, error: 'Cannot delete your own account' });
         return;
       }
 
-      // Clear their session and VPN permissions
-      sessions.delete(id);
+      sessions.deleteAllForUser(id);
       opts.vpnPermissions.removeUser(id);
 
       if (!db.deleteUser(id)) {
@@ -99,9 +98,31 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
     },
   );
 
+  // --- Registration toggle ---
+
+  app.post<{ Body: { enabled: boolean } }>(
+    '/admin/registration',
+    {
+      preHandler: [opts.preHandler, opts.requireAdmin],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['enabled'],
+          properties: {
+            enabled: { type: 'boolean' },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request) => {
+      db.setSetting('allow_registration', request.body.enabled ? 'true' : 'false');
+      return { success: true, data: { enabled: request.body.enabled } };
+    },
+  );
+
   // --- VPN Management (admin only) ---
 
-  // Get available VPN countries/cities
   app.get(
     '/admin/vpn/relays',
     { preHandler: [opts.preHandler, opts.requireAdmin] },
@@ -120,7 +141,6 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
     },
   );
 
-  // Switch VPN country
   app.post<{ Body: { location: string } }>(
     '/admin/vpn/switch',
     {
@@ -157,9 +177,8 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
     },
   );
 
-  // --- VPN Permissions (admin only, in-memory) ---
+  // --- VPN Permissions ---
 
-  // Get current VPN policy
   app.get(
     '/admin/vpn/permissions',
     { preHandler: [opts.preHandler, opts.requireAdmin] },
@@ -174,7 +193,6 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
     },
   );
 
-  // Set server-wide VPN default
   app.put<{ Body: { vpnDefault: 'on' | 'off' } }>(
     '/admin/vpn/default',
     {
@@ -196,7 +214,6 @@ export async function adminRoutes(app: FastifyInstance, opts: AdminRouteOpts) {
     },
   );
 
-  // Grant or revoke VPN toggle permission for a user
   app.put<{ Body: { userId: string; allowed: boolean } }>(
     '/admin/vpn/user-toggle',
     {

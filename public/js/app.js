@@ -4,8 +4,12 @@
   const $ = (sel) => document.querySelector(sel);
   const loginView = $('#login-view');
   const appView = $('#app-view');
+  const authContainer = $('#auth-container');
   const loginForm = $('#login-form');
-  const loginError = $('#login-error');
+  const registerForm = $('#register-form');
+  const recoverForm = $('#recover-form');
+  const authError = $('#auth-error');
+  const registerTab = $('#register-tab');
   const submitSection = $('#submit-section');
   const submitForm = $('#submit-form');
   const extractError = $('#extract-error');
@@ -27,9 +31,14 @@
   const adminSection = $('#admin-section');
   const adminBackBtn = $('#admin-back-btn');
 
-  let loggedIn = false; // track auth state; cookie handles actual auth
+  // Recovery code overlay
+  const recoveryOverlay = $('#recovery-overlay');
+  const recoveryCodeDisplay = $('#recovery-code-display');
+  const recoveryDismiss = $('#recovery-dismiss');
 
-  // Feature flags (fetched from server)
+  let loggedIn = false;
+
+  // Feature flags
   let enableThumbnails = false;
   let darkreelConfigured = false;
   let isAdmin = false;
@@ -38,18 +47,72 @@
   let vpnLocation = null;
   let vpnDefault = 'on';
   let vpnCanToggle = false;
+  let registrationEnabled = false;
 
-  // Extraction results (in-memory only, never persisted)
+  // Extraction results (in-memory only)
   let extractionResult = null;
-  let extractAbort = null; // AbortController for in-flight extraction
+  let extractAbort = null;
 
   // --- Init ---
+  checkRegistrationStatus();
   tryEnterApp();
 
-  // --- Auth ---
+  // --- Recovery code overlay ---
+  function showRecoveryCode(code) {
+    recoveryCodeDisplay.textContent = code;
+    recoveryOverlay.hidden = false;
+  }
+
+  recoveryDismiss.addEventListener('click', () => {
+    recoveryOverlay.hidden = true;
+    recoveryCodeDisplay.textContent = '';
+  });
+
+  // --- Auth tabs ---
+  function showAuthForm(tab) {
+    authError.hidden = true;
+    loginForm.hidden = tab !== 'login';
+    registerForm.hidden = tab !== 'register';
+    recoverForm.hidden = tab !== 'recover';
+
+    // Update tab styles
+    for (const t of authContainer.querySelectorAll('.auth-tab')) {
+      t.classList.toggle('active', t.dataset.tab === tab);
+    }
+  }
+
+  for (const tab of authContainer.querySelectorAll('.auth-tab')) {
+    tab.addEventListener('click', () => showAuthForm(tab.dataset.tab));
+  }
+
+  $('#recover-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    showAuthForm('recover');
+  });
+
+  $('#back-to-login').addEventListener('click', (e) => {
+    e.preventDefault();
+    showAuthForm('login');
+  });
+
+  // --- Registration status ---
+  async function checkRegistrationStatus() {
+    try {
+      const res = await fetch('/auth/registration');
+      if (res.ok) {
+        const data = await res.json();
+        registrationEnabled = data.enabled;
+        registerTab.hidden = !registrationEnabled;
+        // Hide entire tab bar when only one tab is visible (registration disabled)
+        $('.auth-tabs').hidden = !registrationEnabled;
+      }
+    } catch {}
+  }
+
+  // --- Login ---
   loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-    loginError.hidden = true;
+    authError.hidden = true;
     const btn = loginForm.querySelector('button');
     btn.disabled = true;
 
@@ -65,22 +128,125 @@
 
       const data = await res.json();
       if (!res.ok || !data.success) {
-        loginError.textContent = data.error || 'Login failed';
-        loginError.hidden = false;
+        authError.textContent = data.error || 'Login failed';
+        authError.hidden = false;
         return;
       }
 
-      loggedIn = true; // cookie set by server via Set-Cookie
+      loggedIn = true;
       showApp();
     } catch (err) {
       console.error('Login error:', err);
-      loginError.textContent = 'Connection failed';
-      loginError.hidden = false;
+      authError.textContent = 'Connection failed';
+      authError.hidden = false;
     } finally {
       btn.disabled = false;
     }
   });
 
+  // --- Register ---
+  registerForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    authError.hidden = true;
+
+    const pw = $('#reg-password').value;
+    const pwConfirm = $('#reg-password-confirm').value;
+    if (pw !== pwConfirm) {
+      authError.textContent = 'Passwords do not match';
+      authError.hidden = false;
+      return;
+    }
+
+    const btn = registerForm.querySelector('button');
+    btn.disabled = true;
+
+    try {
+      const res = await fetch('/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: $('#reg-username').value,
+          password: pw,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        authError.textContent = data.error || 'Registration failed';
+        authError.hidden = false;
+        return;
+      }
+
+      // Show recovery code
+      showRecoveryCode(data.data.recovery_code);
+
+      // Clear form and switch to login
+      $('#reg-username').value = '';
+      $('#reg-password').value = '';
+      $('#reg-password-confirm').value = '';
+      showAuthForm('login');
+    } catch (err) {
+      console.error('Register error:', err);
+      authError.textContent = 'Connection failed';
+      authError.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // --- Recovery ---
+  recoverForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    authError.hidden = true;
+
+    const pw = $('#rec-password').value;
+    const pwConfirm = $('#rec-password-confirm').value;
+    if (pw !== pwConfirm) {
+      authError.textContent = 'Passwords do not match';
+      authError.hidden = false;
+      return;
+    }
+
+    const btn = recoverForm.querySelector('button');
+    btn.disabled = true;
+
+    try {
+      const res = await fetch('/auth/recover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: $('#rec-username').value,
+          recoveryCode: $('#rec-code').value.trim(),
+          newPassword: pw,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        authError.textContent = data.error || 'Recovery failed';
+        authError.hidden = false;
+        return;
+      }
+
+      // Show new recovery code
+      showRecoveryCode(data.data.recovery_code);
+
+      // Clear form and switch to login
+      $('#rec-username').value = '';
+      $('#rec-code').value = '';
+      $('#rec-password').value = '';
+      $('#rec-password-confirm').value = '';
+      showAuthForm('login');
+    } catch (err) {
+      console.error('Recovery error:', err);
+      authError.textContent = 'Connection failed';
+      authError.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // --- Logout ---
   logoutBtn.addEventListener('click', async () => {
     await fetch('/auth/logout', { method: 'POST' }).catch(() => {});
     logout();
@@ -98,7 +264,7 @@
     btn.innerHTML = '<span class="spinner"></span>Extracting...';
     extractError.hidden = true;
 
-    // Check if URL is a direct link to a media file — skip extraction
+    // Check if URL is a direct link to a media file
     const directMatch = isDirectMediaUrl(url);
     if (directMatch) {
       extractionResult = { videos: [directMatch], pageTitle: '' };
@@ -106,7 +272,6 @@
       showResultsStreaming();
       removeLoadingIndicator();
       addVideoCard(directMatch, 0);
-      // Enable download immediately (no probe needed for direct URLs)
       const card = resultsList.querySelector('[data-vid-idx="0"]');
       if (card) card.querySelectorAll('.btn-download, .btn-upload').forEach(b => { b.disabled = false; });
       const spinner = resultsList.querySelector('[data-probe-spinner="0"]');
@@ -117,11 +282,9 @@
       return;
     }
 
-    // Abort any previous extraction
     if (extractAbort) extractAbort.abort();
     extractAbort = new AbortController();
 
-    // Switch to results view immediately with empty list
     extractionResult = { videos: [], pageTitle: '' };
     urlInput.value = '';
     showResultsStreaming();
@@ -129,11 +292,10 @@
     try {
       const useVpn = (vpnAvailable && vpnCanToggle) ? $('#use-vpn').checked : undefined;
       const includeImages = $('#include-images')?.checked || false;
-      const autoPlay = $('#auto-play')?.checked || false;
       const res = await api('/extract/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, useVpn, includeImages, autoPlay }),
+        body: JSON.stringify({ url, useVpn, includeImages }),
         signal: extractAbort.signal,
       });
 
@@ -182,12 +344,10 @@
         }
       }
 
-      // If no videos found at all
       if (extractionResult.videos.length === 0) {
         resultsList.innerHTML = '<p class="empty">No videos found on this page</p>';
       }
     } catch (err) {
-      // Don't show error if the request was intentionally aborted (Back button)
       if (err && err.name === 'AbortError') return;
       if (extractionResult && extractionResult.videos.length === 0) {
         extractError.textContent = 'Connection failed';
@@ -204,14 +364,12 @@
 
   // --- Back button ---
   backBtn.addEventListener('click', () => {
-    // Abort any in-flight extraction
     if (extractAbort) {
       extractAbort.abort();
       extractAbort = null;
     }
     extractionResult = null;
     hideResults();
-    // Reset submit button in case it's still in extracting state
     const btn = submitForm.querySelector('button');
     btn.disabled = false;
     btn.textContent = 'Extract';
@@ -241,7 +399,6 @@
   }
 
   function addVideoCard(v, idx) {
-    // Remove the "searching" placeholder if it exists
     const placeholder = resultsList.querySelector('.empty');
     if (placeholder) placeholder.remove();
 
@@ -250,7 +407,6 @@
 
     let thumbHtml = '';
     if (v.mediaKind === 'image' || enableThumbnails) {
-      // Proxy all thumbnails through /thumbnail to respect CSP (img-src 'self')
       thumbHtml = `<div class="thumb-wrapper"><span class="spinner-mini thumb-spinner"></span><img class="video-thumb" loading="lazy" src="/thumbnail?videoUrl=${encodeURIComponent(v.url)}" alt="" width="160" height="90"></div>`;
     }
 
@@ -282,7 +438,6 @@
       </div>
     `;
 
-    // Attach handlers to this card's buttons
     card.querySelector('.btn-download')?.addEventListener('click', (e) => handleDownload(e.target));
     card.querySelector('.btn-upload')?.addEventListener('click', (e) => handleUpload(e.target));
     const thumb = card.querySelector('.video-thumb');
@@ -292,13 +447,11 @@
       thumb.addEventListener('error', () => { const w = card.querySelector('.thumb-wrapper'); if (w) w.style.display = 'none'; });
     }
 
-    // Route to the correct section based on media kind
     if (v.mediaKind === 'image') {
       imagesList.appendChild(card);
       imagesSection.hidden = false;
       imagesCount.textContent = imagesList.children.length;
     } else {
-      // Insert before the loading indicator (if present), otherwise append
       const loader = resultsList.querySelector('.results-loading');
       if (loader) {
         resultsList.insertBefore(card, loader);
@@ -315,7 +468,6 @@
   }
 
   function updateVideoMeta(idx, meta) {
-    // Find the card — could be in results, images, or filtered
     const card = resultsList.querySelector(`[data-vid-idx="${idx}"]`)
               || imagesList.querySelector(`[data-vid-idx="${idx}"]`)
               || filteredList.querySelector(`[data-vid-idx="${idx}"]`);
@@ -324,12 +476,10 @@
     const tagsRow = card.querySelector(`[data-tags-idx="${idx}"]`);
     if (!tagsRow) return;
 
-    // Remove the probe spinner and enable action buttons
     const spinner = tagsRow.querySelector(`[data-probe-spinner="${idx}"]`);
     if (spinner) spinner.remove();
     card.querySelectorAll('.btn-download, .btn-upload').forEach((btn) => { btn.disabled = false; });
 
-    // Append quality badge if not already present
     if (meta.quality && !tagsRow.querySelector('.quality-badge')) {
       const span = document.createElement('span');
       span.className = 'quality-badge';
@@ -337,7 +487,6 @@
       tagsRow.appendChild(span);
     }
 
-    // Append duration
     if (meta.durationSec) {
       const span = document.createElement('span');
       span.className = 'meta-tag';
@@ -345,7 +494,6 @@
       tagsRow.appendChild(span);
     }
 
-    // Append file size
     if (meta.fileSize) {
       const span = document.createElement('span');
       span.className = 'meta-tag';
@@ -353,7 +501,6 @@
       tagsRow.appendChild(span);
     }
 
-    // Move tiny files / likely ads to the filtered section
     const isTiny = meta.fileSize && meta.fileSize < 5120;
     const isFlash = meta.durationSec && meta.durationSec <= 2;
     if (isTiny || isFlash) {
@@ -362,7 +509,6 @@
   }
 
   function moveToFiltered(card) {
-    // Only move if it's currently in a results list (not already filtered)
     if (!resultsList.contains(card) && !imagesList.contains(card)) return;
     const wasImage = imagesList.contains(card);
     card.remove();
@@ -488,28 +634,28 @@
         const data = await res.json();
         enableThumbnails = data.enableThumbnails ?? false;
         darkreelConfigured = data.darkreelConfigured ?? false;
+        registrationEnabled = data.registrationEnabled ?? false;
         isAdmin = data.isAdmin ?? false;
         currentUserId = data.userId ?? null;
         vpnAvailable = data.vpn?.available ?? false;
         vpnLocation = data.vpn?.location ?? null;
         vpnDefault = data.vpn?.default ?? 'on';
         vpnCanToggle = data.vpn?.canToggle ?? false;
-        // Show/hide admin button
         adminBtn.hidden = !isAdmin;
-        // Show/hide VPN toggle — only if VPN is available AND user can toggle
         const vpnToggle = $('#vpn-toggle');
         vpnToggle.hidden = !vpnAvailable || !vpnCanToggle;
         if (vpnAvailable) {
           $('#use-vpn').checked = vpnDefault === 'on';
-          if (vpnLocation) $('#vpn-location').textContent = vpnLocation.toUpperCase();
         }
       }
-    } catch { /* defaults are fine */ }
+    } catch {}
   }
 
   function showLogin() {
-    loginView.hidden = false;
     appView.hidden = true;
+    loginView.hidden = false;
+    showAuthForm('login');
+    checkRegistrationStatus();
   }
 
   async function showApp() {
@@ -517,7 +663,6 @@
     appView.hidden = false;
     await fetchConfig();
 
-    // Restore active view
     const savedView = sessionStorage.getItem('ppvda_view');
     if (savedView === 'settings') {
       submitSection.hidden = true;
@@ -534,11 +679,9 @@
     extractionResult = null;
     sessionStorage.removeItem('ppvda_view');
     hideResults();
-    // Reset all sections to default state
     settingsSection.hidden = true;
     adminSection.hidden = true;
     submitSection.hidden = false;
-    // Clear login form
     $('#username').value = '';
     $('#password').value = '';
     showLogin();
@@ -589,12 +732,9 @@
     return `${m}:${s.toString().padStart(2, '0')}`;
   }
 
-  // Parse SSE events from a text buffer.
-  // Returns { events: [{event, data}], remainder: string }
   function parseSSEEvents(buffer) {
     const events = [];
     const blocks = buffer.split('\n\n');
-    // Last element may be incomplete — keep as remainder
     const remainder = blocks.pop() || '';
 
     for (const block of blocks) {
@@ -628,13 +768,11 @@
     settingsSection.hidden = false;
     sessionStorage.setItem('ppvda_view', 'settings');
 
-    // Check if Darkreel creds are configured
     try {
       const res = await api('/settings/darkreel');
       if (res.ok) {
         const data = await res.json();
-        const removeBtn = $('#dr-remove-btn');
-        removeBtn.hidden = !data.data.configured;
+        setDarkreelFormState(data.data.configured);
         $('#dr-status').hidden = true;
       }
     } catch {}
@@ -644,6 +782,13 @@
     settingsSection.hidden = true;
     showMainView();
   });
+
+  function setDarkreelFormState(configured) {
+    $('#darkreel-form').hidden = configured;
+    $('#dr-desc').hidden = configured;
+    $('#dr-configured-msg').hidden = !configured;
+    $('#dr-remove-btn').hidden = !configured;
+  }
 
   // Darkreel creds form
   $('#darkreel-form').addEventListener('submit', async (e) => {
@@ -666,12 +811,11 @@
         status.textContent = 'Credentials saved';
         status.className = 'settings-status success';
         status.hidden = false;
-        $('#dr-remove-btn').hidden = false;
         darkreelConfigured = true;
-        // Clear the form
         $('#dr-server').value = '';
         $('#dr-username').value = '';
         $('#dr-password').value = '';
+        setDarkreelFormState(true);
       } else {
         const data = await res.json().catch(() => ({}));
         status.textContent = data.error || 'Failed to save';
@@ -694,8 +838,8 @@
         status.textContent = 'Credentials removed';
         status.className = 'settings-status success';
         status.hidden = false;
-        $('#dr-remove-btn').hidden = true;
         darkreelConfigured = false;
+        setDarkreelFormState(false);
       }
     } catch {
       status.textContent = 'Failed to remove';
@@ -719,6 +863,9 @@
       return;
     }
 
+    const btn = e.target.querySelector('button');
+    btn.disabled = true;
+
     try {
       const res = await api('/auth/change-password', {
         method: 'POST',
@@ -736,6 +883,11 @@
         $('#old-password').value = '';
         $('#new-password').value = '';
         $('#confirm-new-password').value = '';
+
+        // Show new recovery code
+        if (data.data?.recovery_code) {
+          showRecoveryCode(data.data.recovery_code);
+        }
       } else {
         status.textContent = data.error || 'Failed';
         status.className = 'settings-status error';
@@ -745,6 +897,8 @@
       status.textContent = 'Connection failed';
       status.className = 'settings-status error';
       status.hidden = false;
+    } finally {
+      btn.disabled = false;
     }
   });
 
@@ -786,7 +940,7 @@
     settingsSection.hidden = true;
     adminSection.hidden = false;
     sessionStorage.setItem('ppvda_view', 'admin');
-    const tasks = [loadUsers()];
+    const tasks = [loadUsers(), loadRegistrationStatus()];
     if (vpnAvailable) {
       tasks.push(loadVpnRelays(), loadVpnPermissions());
     }
@@ -832,11 +986,52 @@
     } catch {}
   }
 
+  // --- Registration toggle ---
+  async function loadRegistrationStatus() {
+    try {
+      const res = await api('/auth/registration');
+      if (res.ok) {
+        const data = await res.json();
+        $('#registration-select').value = data.enabled ? 'true' : 'false';
+      }
+    } catch {}
+  }
+
+  $('#registration-save-btn').addEventListener('click', async () => {
+    const status = $('#registration-status');
+    const enabled = $('#registration-select').value === 'true';
+    try {
+      const res = await api('/admin/registration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      if (res.ok) {
+        registrationEnabled = enabled;
+        registerTab.hidden = !registrationEnabled;
+        $('.auth-tabs').hidden = !registrationEnabled;
+        status.textContent = `Registration ${enabled ? 'enabled' : 'disabled'}`;
+        status.className = 'settings-status success';
+      } else {
+        status.textContent = 'Failed to save';
+        status.className = 'settings-status error';
+      }
+      status.hidden = false;
+    } catch {
+      status.textContent = 'Connection failed';
+      status.className = 'settings-status error';
+      status.hidden = false;
+    }
+  });
+
   // Create user form
   $('#create-user-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const status = $('#create-user-status');
     status.hidden = true;
+
+    const btn = e.target.querySelector('button');
+    btn.disabled = true;
 
     try {
       const res = await api('/admin/users', {
@@ -858,6 +1053,11 @@
         $('#new-user-admin').checked = false;
         await loadUsers();
         if (vpnAvailable) await loadVpnPermissions();
+
+        // Show recovery code for the new user
+        if (data.data?.recovery_code) {
+          showRecoveryCode(data.data.recovery_code);
+        }
       } else {
         status.textContent = data.error || 'Failed';
         status.className = 'settings-status error';
@@ -867,8 +1067,11 @@
       status.textContent = 'Connection failed';
       status.className = 'settings-status error';
       status.hidden = false;
+    } finally {
+      btn.disabled = false;
     }
   });
+
   // --- Admin VPN Permissions ---
   async function loadVpnPermissions() {
     const section = $('#vpn-perms-section');
@@ -884,18 +1087,15 @@
       const toggleIds = new Set(permsData.data?.toggleUserIds ?? []);
       const users = usersData.data ?? [];
 
-      // Set default selector
       $('#vpn-default-select').value = permsData.data?.vpnDefault ?? 'on';
 
-      // Render per-user toggle list
       const list = $('#vpn-user-toggle-list');
       if (users.length === 0) {
         list.innerHTML = '<p class="empty">No users</p>';
       } else {
         list.innerHTML = users.map((u) => {
-          const isMe = u.id === currentUserId;
           const checked = u.is_admin || toggleIds.has(u.id);
-          const disabled = u.is_admin; // admins always have toggle
+          const disabled = u.is_admin;
           return `<div class="user-card">
             <div class="user-card-info">
               ${esc(u.username)}
@@ -907,7 +1107,6 @@
           </div>`;
         }).join('');
 
-        // Attach change handlers
         list.querySelectorAll('[data-vpn-user]').forEach((cb) => {
           if (cb.disabled) return;
           cb.addEventListener('change', async () => {
@@ -1008,7 +1207,6 @@
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         vpnLocation = location;
-        $('#vpn-location').textContent = location.toUpperCase();
         status.textContent = `Switched to ${data.data?.country} — ${data.data?.city}`;
         status.className = 'settings-status success';
       } else {

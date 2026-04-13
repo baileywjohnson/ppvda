@@ -67,7 +67,7 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
         return;
       }
 
-      const masterKey = sessions.get(userId);
+      const masterKey = sessions.getKeyForUser(userId);
       if (!masterKey) {
         reply.status(401).send({ success: false, error: 'Session expired, please re-login' });
         return;
@@ -97,7 +97,7 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
  * Decrypt a user's Darkreel credentials. Returns null if not configured or session expired.
  */
 export function getUserDarkreelCreds(db: DB, sessions: SessionStore, userId: string): DarkreelCreds | null {
-  const masterKey = sessions.get(userId);
+  const masterKey = sessions.getKeyForUser(userId);
   if (!masterKey) return null;
 
   const row = db.getDarkreelCreds(userId);

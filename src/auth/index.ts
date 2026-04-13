@@ -1,15 +1,37 @@
+import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
-import { SignJWT, jwtVerify, errors as joseErrors } from 'jose';
+import { SignJWT, jwtVerify } from 'jose';
 import type { DB } from '../db/index.js';
 import type { SessionStore } from './sessions.js';
 import {
-  hashPassword, verifyPassword,
-  deriveKeyFromPassword, generateSalt,
-  encrypt, decrypt, generateMasterKey,
-  zeroBuffer, isStrongPassword, PASSWORD_REQUIREMENTS,
-  PBKDF2_ITERATIONS,
+  hashPassword, verifyPassword, verifyPasswordLegacy,
+  deriveKey, deriveKeyPBKDF2,
+  generateSalt, encrypt, decrypt,
+  encryptBlock, encryptMasterKeyForRecovery, decryptMasterKeyWithRecovery,
+  generateMasterKey, generateRecoveryCode,
+  zeroBuffer, isStrongPassword, isValidUsername,
+  PASSWORD_REQUIREMENTS,
 } from '../crypto/index.js';
+
+// --- Per-username rate limiter (matches Darkreel's AccountLimiter) ---
+
+class AccountLimiter {
+  private attempts = new Map<string, { count: number; windowStart: number }>();
+  private maxAttempts = 10;
+  private windowMs = 15 * 60 * 1000; // 15 minutes
+
+  allow(username: string): boolean {
+    const now = Date.now();
+    const entry = this.attempts.get(username);
+    if (!entry || now - entry.windowStart > this.windowMs) {
+      this.attempts.set(username, { count: 1, windowStart: now });
+      return true;
+    }
+    entry.count++;
+    return entry.count <= this.maxAttempts;
+  }
+}
 
 interface AuthOpts {
   db: DB;
@@ -19,24 +41,27 @@ interface AuthOpts {
 
 export interface UserContext {
   userId: string;
+  sessionId: string;
   username: string;
   isAdmin: boolean;
 }
 
 interface JWTPayload {
-  sub: string;
+  sub: string;    // userId
+  sid: string;    // sessionId
   isAdmin: boolean;
 }
 
 export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
   const { db, sessions } = opts;
   const secret = new TextEncoder().encode(opts.jwtSecret);
+  const accountLimiter = new AccountLimiter();
 
   await app.register(fastifyCookie);
 
   // --- JWT helpers ---
   async function signToken(payload: JWTPayload): Promise<string> {
-    return new SignJWT({ isAdmin: payload.isAdmin })
+    return new SignJWT({ isAdmin: payload.isAdmin, sid: payload.sid })
       .setProtectedHeader({ alg: 'HS256' })
       .setSubject(payload.sub)
       .setIssuedAt()
@@ -48,19 +73,19 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
     const { payload } = await jwtVerify(token, secret, {
       algorithms: ['HS256'],
     });
-    return { sub: payload.sub as string, isAdmin: !!payload.isAdmin };
+    return {
+      sub: payload.sub as string,
+      sid: payload.sid as string,
+      isAdmin: !!payload.isAdmin,
+    };
   }
 
   // --- Extract token from request ---
   function extractToken(request: FastifyRequest): string | undefined {
-    // Cookie first
     const cookieToken = request.cookies?.token;
     if (cookieToken) return cookieToken;
-
-    // Authorization header
     const auth = request.headers.authorization;
     if (auth?.startsWith('Bearer ')) return auth.slice(7);
-
     return undefined;
   }
 
@@ -81,22 +106,22 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
       return reply;
     }
 
-    (request as any).user = payload;
+    // Verify session exists (by sessionId, not userId)
+    if (!payload.sid || !sessions.has(payload.sid)) {
+      reply.clearCookie('token', { path: '/' });
+      reply.status(401).send({ success: false, error: 'Session expired' });
+      return reply;
+    }
 
-    // Verify user still exists and has an active session (master key in RAM).
-    // After a server restart the session store is empty, so this forces re-login
-    // rather than leaving the user in a half-authenticated state.
+    // Verify user still exists
     const userId = payload.sub;
     if (!userId || !db.getUserById(userId)) {
       reply.clearCookie('token', { path: '/' });
       reply.status(401).send({ success: false, error: 'Account no longer exists' });
       return reply;
     }
-    if (!sessions.has(userId)) {
-      reply.clearCookie('token', { path: '/' });
-      reply.status(401).send({ success: false, error: 'Session expired' });
-      return reply;
-    }
+
+    (request as any).user = payload;
   };
 
   // --- Admin-only preHandler ---
@@ -108,15 +133,130 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
     }
   };
 
+  // --- Helper: login a user and create session + token ---
+  async function createSessionAndToken(
+    userId: string,
+    isAdmin: boolean,
+    masterKey: Buffer,
+  ): Promise<{ token: string; sessionId: string }> {
+    const sessionId = sessions.generateId();
+    sessions.set(sessionId, userId, masterKey);
+    const token = await signToken({ sub: userId, sid: sessionId, isAdmin });
+    return { token, sessionId };
+  }
+
+  // --- Helper: set auth cookie ---
+  function setAuthCookie(reply: FastifyReply, token: string): void {
+    reply.setCookie('token', token, {
+      path: '/',
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: process.env.NODE_ENV === 'production',
+    });
+  }
+
+  // --- Registration status (public endpoint) ---
+  app.get('/auth/registration', async () => {
+    const setting = db.getSetting('allow_registration');
+    return { enabled: setting === 'true' };
+  });
+
+  // --- Register (public, rate-limited) ---
+  app.post<{ Body: { username: string; password: string } }>(
+    '/auth/register',
+    {
+      config: {
+        rateLimit: { max: 5, timeWindow: '1 minute' },
+      },
+      schema: {
+        body: {
+          type: 'object',
+          required: ['username', 'password'],
+          properties: {
+            username: { type: 'string', minLength: 3 },
+            password: { type: 'string', minLength: 16 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      // Check if registration is enabled
+      const setting = db.getSetting('allow_registration');
+      if (setting !== 'true') {
+        reply.status(403).send({ success: false, error: 'Registration is disabled' });
+        return;
+      }
+
+      const { username, password } = request.body;
+
+      if (!isValidUsername(username)) {
+        reply.status(400).send({ success: false, error: 'Username must be 3-64 alphanumeric characters' });
+        return;
+      }
+      if (!isStrongPassword(password)) {
+        reply.status(400).send({ success: false, error: PASSWORD_REQUIREMENTS });
+        return;
+      }
+      if (db.getUserByUsername(username)) {
+        reply.status(409).send({ success: false, error: 'Registration failed.' });
+        return;
+      }
+
+      // Generate user ID first — needed as AAD for master key encryption
+      const userId = randomUUID();
+      const userIdBytes = Buffer.from(userId, 'utf-8');
+
+      // Generate dual salts (matching Darkreel)
+      const authSalt = generateSalt();
+      const kdfSalt = generateSalt();
+
+      // Hash password with Argon2id
+      const passwordHash = await hashPassword(password, authSalt);
+
+      // Generate independent master key
+      const masterKey = generateMasterKey();
+
+      // Encrypt master key with password-derived key (Argon2id) + AAD
+      const kdfKey = await deriveKey(password, kdfSalt);
+      const { ciphertext: encMasterKey, nonce: masterKeyNonce } = encrypt(masterKey, kdfKey, userIdBytes);
+      zeroBuffer(kdfKey);
+
+      // Generate recovery code and encrypt master key with it
+      const recoveryCode = generateRecoveryCode();
+      const recoveryMK = encryptMasterKeyForRecovery(masterKey, recoveryCode, userIdBytes);
+      const recoveryCodeB64 = recoveryCode.toString('base64url');
+      zeroBuffer(recoveryCode);
+      zeroBuffer(masterKey);
+
+      db.createUser({
+        id: userId,
+        username,
+        passwordHash,
+        authSalt,
+        passwordSalt: kdfSalt,
+        encryptedMasterKey: encMasterKey,
+        masterKeyNonce,
+        recoveryMK,
+        isAdmin: false,
+      });
+
+      reply.status(201).send({
+        success: true,
+        data: {
+          id: userId,
+          recovery_code: recoveryCodeB64,
+        },
+      });
+    },
+  );
+
   // --- Login ---
   app.post<{ Body: { username: string; password: string } }>(
     '/auth/login',
     {
       config: {
-        rateLimit: {
-          max: 5,
-          timeWindow: '1 minute',
-        },
+        rateLimit: { max: 5, timeWindow: '1 minute' },
       },
       schema: {
         body: {
@@ -133,57 +273,331 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
     async (request, reply) => {
       const { username, password } = request.body;
 
+      // Per-username rate limit (prevents distributed brute-force)
+      if (!accountLimiter.allow(username)) {
+        // Dummy work so timing is indistinguishable
+        const dummySalt = generateSalt();
+        await deriveKey(password, dummySalt);
+        reply.status(401).send({ success: false, error: 'Username and/or password is incorrect.' });
+        return;
+      }
+
       const user = db.getUserByUsername(username);
-      if (!user || !verifyPassword(password, user.password_hash)) {
-        reply.status(401).send({ success: false, error: 'Invalid credentials' });
+      if (!user) {
+        // Dummy Argon2id derivation to prevent timing-based username enumeration
+        const dummySalt = generateSalt();
+        await deriveKey(password, dummySalt);
+        reply.status(401).send({ success: false, error: 'Username and/or password is incorrect.' });
         return;
       }
 
-      // Derive user key using stored iteration count and decrypt master key
-      const storedIterations = user.kdf_iterations ?? 100_000;
-      const userKey = deriveKeyFromPassword(password, user.password_salt, storedIterations);
+      const isLegacy = user.auth_salt === null;
+
+      // --- Verify password ---
+      if (isLegacy) {
+        // Legacy scrypt verification
+        if (!verifyPasswordLegacy(password, user.password_hash)) {
+          reply.status(401).send({ success: false, error: 'Username and/or password is incorrect.' });
+          return;
+        }
+      } else {
+        // Argon2id verification
+        if (!await verifyPassword(password, user.auth_salt!, user.password_hash)) {
+          reply.status(401).send({ success: false, error: 'Username and/or password is incorrect.' });
+          return;
+        }
+      }
+
+      // --- Decrypt master key ---
+      const userIdBytes = Buffer.from(user.id, 'utf-8');
       let masterKey: Buffer;
-      try {
-        masterKey = decrypt(user.encrypted_master_key, user.master_key_nonce, userKey);
-      } catch {
-        zeroBuffer(userKey);
-        reply.status(500).send({ success: false, error: 'Failed to decrypt session key' });
-        return;
-      }
-      zeroBuffer(userKey);
 
-      // Transparently upgrade KDF iterations if below current target
-      if (storedIterations < PBKDF2_ITERATIONS) {
-        const newSalt = generateSalt();
-        const newUserKey = deriveKeyFromPassword(password, newSalt, PBKDF2_ITERATIONS);
-        const { ciphertext: newEncMasterKey, nonce: newNonce } = encrypt(masterKey, newUserKey);
-        zeroBuffer(newUserKey);
-        db.updateUserKdf(user.id, newSalt, newEncMasterKey, newNonce, PBKDF2_ITERATIONS);
+      if (isLegacy) {
+        // Legacy: PBKDF2-derived key, no AAD
+        const storedIterations = user.kdf_iterations ?? 100_000;
+        const legacyKey = deriveKeyPBKDF2(password, user.password_salt, storedIterations);
+        try {
+          masterKey = decrypt(user.encrypted_master_key, user.master_key_nonce, legacyKey);
+        } catch {
+          zeroBuffer(legacyKey);
+          reply.status(500).send({ success: false, error: 'Failed to decrypt session key' });
+          return;
+        }
+        zeroBuffer(legacyKey);
+
+        // Transparently upgrade to Argon2id + AAD + recovery code
+        const newAuthSalt = generateSalt();
+        const newKdfSalt = generateSalt();
+        const newPasswordHash = await hashPassword(password, newAuthSalt);
+        const newKdfKey = await deriveKey(password, newKdfSalt);
+        const { ciphertext: newEncMK, nonce: newMKNonce } = encrypt(masterKey, newKdfKey, userIdBytes);
+        zeroBuffer(newKdfKey);
+        const newRecoveryCode = generateRecoveryCode();
+        const newRecoveryMK = encryptMasterKeyForRecovery(masterKey, newRecoveryCode, userIdBytes);
+        zeroBuffer(newRecoveryCode);
+
+        db.updateUserAuth(user.id, {
+          passwordHash: newPasswordHash,
+          authSalt: newAuthSalt,
+          passwordSalt: newKdfSalt,
+          encryptedMasterKey: newEncMK,
+          masterKeyNonce: newMKNonce,
+          recoveryMK: newRecoveryMK,
+        });
+      } else {
+        // New: Argon2id-derived key, with AAD
+        const kdfKey = await deriveKey(password, user.password_salt);
+        try {
+          masterKey = decrypt(user.encrypted_master_key, user.master_key_nonce, kdfKey, userIdBytes);
+        } catch {
+          zeroBuffer(kdfKey);
+          reply.status(500).send({ success: false, error: 'Failed to decrypt session key' });
+          return;
+        }
+        zeroBuffer(kdfKey);
       }
 
-      // Store master key in session
-      sessions.set(user.id, masterKey);
+      // Create session and token
+      const { token } = await createSessionAndToken(user.id, !!user.is_admin, masterKey);
       zeroBuffer(masterKey);
 
-      const token = await signToken({ sub: user.id, isAdmin: !!user.is_admin });
-
-      reply
-        .setCookie('token', token, {
-          path: '/',
-          httpOnly: true,
-          sameSite: 'strict',
-          secure: process.env.NODE_ENV === 'production',
-        })
-        .send({ success: true, token });
+      setAuthCookie(reply, token);
+      reply.send({ success: true, token });
     },
   );
 
   // --- Logout ---
   app.post('/auth/logout', { preHandler: authenticate }, async (request, reply) => {
     const user = (request as any).user;
-    if (user?.sub) sessions.delete(user.sub);
+    if (user?.sid) sessions.delete(user.sid);
     reply.clearCookie('token', { path: '/' }).send({ success: true });
   });
+
+  // --- Recover (public, rate-limited) ---
+  app.post<{ Body: { username: string; recoveryCode: string; newPassword: string } }>(
+    '/auth/recover',
+    {
+      config: {
+        rateLimit: { max: 5, timeWindow: '1 minute' },
+      },
+      schema: {
+        body: {
+          type: 'object',
+          required: ['username', 'recoveryCode', 'newPassword'],
+          properties: {
+            username: { type: 'string', minLength: 1 },
+            recoveryCode: { type: 'string', minLength: 1 },
+            newPassword: { type: 'string', minLength: 16 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { username, recoveryCode: recoveryCodeB64, newPassword } = request.body;
+
+      if (!isStrongPassword(newPassword)) {
+        reply.status(400).send({ success: false, error: PASSWORD_REQUIREMENTS });
+        return;
+      }
+
+      // Per-username rate limit
+      if (!accountLimiter.allow(username)) {
+        const dummySalt = generateSalt();
+        await deriveKey(newPassword, dummySalt);
+        reply.status(400).send({ success: false, error: 'Username and/or recovery code is incorrect.' });
+        return;
+      }
+
+      const user = db.getUserByUsername(username);
+      if (!user || !user.recovery_mk) {
+        // Dummy work to prevent timing-based enumeration
+        const dummySalt = generateSalt();
+        await deriveKey(newPassword, dummySalt);
+        try { decryptMasterKeyWithRecovery(Buffer.alloc(60), Buffer.alloc(32), Buffer.from('dummy')); } catch {}
+        reply.status(400).send({ success: false, error: 'Username and/or recovery code is incorrect.' });
+        return;
+      }
+
+      // Decode recovery code — always attempt decryption to prevent timing leaks
+      let recoveryCode: Buffer;
+      let decodeOk = true;
+      try {
+        recoveryCode = Buffer.from(recoveryCodeB64, 'base64url');
+        if (recoveryCode.length !== 32) {
+          recoveryCode = Buffer.alloc(32);
+          decodeOk = false;
+        }
+      } catch {
+        recoveryCode = Buffer.alloc(32);
+        decodeOk = false;
+      }
+
+      // Decrypt master key with recovery code
+      const userIdBytes = Buffer.from(user.id, 'utf-8');
+      let masterKey: Buffer;
+      try {
+        masterKey = decryptMasterKeyWithRecovery(user.recovery_mk, recoveryCode, userIdBytes);
+      } catch {
+        zeroBuffer(recoveryCode);
+        reply.status(400).send({ success: false, error: 'Username and/or recovery code is incorrect.' });
+        return;
+      }
+      zeroBuffer(recoveryCode);
+
+      if (!decodeOk) {
+        zeroBuffer(masterKey);
+        reply.status(400).send({ success: false, error: 'Username and/or recovery code is incorrect.' });
+        return;
+      }
+
+      // Re-encrypt with new password
+      const newAuthSalt = generateSalt();
+      const newKdfSalt = generateSalt();
+      const newPasswordHash = await hashPassword(newPassword, newAuthSalt);
+      const newKdfKey = await deriveKey(newPassword, newKdfSalt);
+      const { ciphertext: newEncMK, nonce: newMKNonce } = encrypt(masterKey, newKdfKey, userIdBytes);
+      zeroBuffer(newKdfKey);
+
+      // Rotate recovery code
+      const newRecoveryCode = generateRecoveryCode();
+      const newRecoveryMK = encryptMasterKeyForRecovery(masterKey, newRecoveryCode, userIdBytes);
+      const newRecoveryCodeB64 = newRecoveryCode.toString('base64url');
+      zeroBuffer(newRecoveryCode);
+      zeroBuffer(masterKey);
+
+      // Atomic update
+      db.updateUserAuth(user.id, {
+        passwordHash: newPasswordHash,
+        authSalt: newAuthSalt,
+        passwordSalt: newKdfSalt,
+        encryptedMasterKey: newEncMK,
+        masterKeyNonce: newMKNonce,
+        recoveryMK: newRecoveryMK,
+      });
+
+      // Invalidate all sessions
+      sessions.deleteAllForUser(user.id);
+
+      reply.send({
+        success: true,
+        data: { recovery_code: newRecoveryCodeB64 },
+      });
+    },
+  );
+
+  // --- Change Password ---
+  app.post<{ Body: { oldPassword: string; newPassword: string } }>(
+    '/auth/change-password',
+    {
+      preHandler: authenticate,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['oldPassword', 'newPassword'],
+          properties: {
+            oldPassword: { type: 'string', minLength: 1 },
+            newPassword: { type: 'string', minLength: 16 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { sub: userId, sid: sessionId } = (request as any).user;
+      const { oldPassword, newPassword } = request.body;
+
+      if (!isStrongPassword(newPassword)) {
+        reply.status(400).send({ success: false, error: PASSWORD_REQUIREMENTS });
+        return;
+      }
+
+      const user = db.getUserById(userId);
+      if (!user) {
+        reply.status(404).send({ success: false, error: 'User not found' });
+        return;
+      }
+
+      // Verify old password
+      const isLegacy = user.auth_salt === null;
+      if (isLegacy) {
+        if (!verifyPasswordLegacy(oldPassword, user.password_hash)) {
+          reply.status(400).send({ success: false, error: 'Current password is incorrect' });
+          return;
+        }
+      } else {
+        if (!await verifyPassword(oldPassword, user.auth_salt!, user.password_hash)) {
+          reply.status(400).send({ success: false, error: 'Current password is incorrect' });
+          return;
+        }
+      }
+
+      // Decrypt master key with old password
+      const userIdBytes = Buffer.from(user.id, 'utf-8');
+      let masterKey: Buffer;
+
+      if (isLegacy) {
+        const storedIterations = user.kdf_iterations ?? 100_000;
+        const legacyKey = deriveKeyPBKDF2(oldPassword, user.password_salt, storedIterations);
+        try {
+          masterKey = decrypt(user.encrypted_master_key, user.master_key_nonce, legacyKey);
+        } catch {
+          zeroBuffer(legacyKey);
+          reply.status(500).send({ success: false, error: 'Failed to decrypt session key' });
+          return;
+        }
+        zeroBuffer(legacyKey);
+      } else {
+        const oldKdfKey = await deriveKey(oldPassword, user.password_salt);
+        try {
+          masterKey = decrypt(user.encrypted_master_key, user.master_key_nonce, oldKdfKey, userIdBytes);
+        } catch {
+          zeroBuffer(oldKdfKey);
+          reply.status(500).send({ success: false, error: 'Failed to decrypt session key' });
+          return;
+        }
+        zeroBuffer(oldKdfKey);
+      }
+
+      // Re-encrypt master key with new password (always Argon2id + AAD)
+      const newAuthSalt = generateSalt();
+      const newKdfSalt = generateSalt();
+      const newPasswordHash = await hashPassword(newPassword, newAuthSalt);
+      const newKdfKey = await deriveKey(newPassword, newKdfSalt);
+      const { ciphertext: newEncMK, nonce: newMKNonce } = encrypt(masterKey, newKdfKey, userIdBytes);
+      zeroBuffer(newKdfKey);
+
+      // Rotate recovery code
+      const newRecoveryCode = generateRecoveryCode();
+      const newRecoveryMK = encryptMasterKeyForRecovery(masterKey, newRecoveryCode, userIdBytes);
+      const recoveryCodeB64 = newRecoveryCode.toString('base64url');
+      zeroBuffer(newRecoveryCode);
+
+      // Atomic update
+      db.updateUserAuth(user.id, {
+        passwordHash: newPasswordHash,
+        authSalt: newAuthSalt,
+        passwordSalt: newKdfSalt,
+        encryptedMasterKey: newEncMK,
+        masterKeyNonce: newMKNonce,
+        recoveryMK: newRecoveryMK,
+      });
+
+      // Invalidate all existing sessions
+      sessions.deleteAllForUser(user.id);
+
+      // Create fresh session
+      const { token } = await createSessionAndToken(user.id, !!user.is_admin, masterKey);
+      zeroBuffer(masterKey);
+
+      setAuthCookie(reply, token);
+      reply.send({
+        success: true,
+        token,
+        data: { recovery_code: recoveryCodeB64 },
+      });
+    },
+  );
 
   // --- Delete Own Account ---
   app.delete<{ Body: { password: string } }>(
@@ -206,12 +620,26 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
       const { password } = request.body;
 
       const user = db.getUserById(userId);
-      if (!user || !verifyPassword(password, user.password_hash)) {
-        reply.status(400).send({ success: false, error: 'Password is incorrect' });
+      if (!user) {
+        reply.status(404).send({ success: false, error: 'User not found' });
         return;
       }
 
-      sessions.delete(userId);
+      // Verify password
+      const isLegacy = user.auth_salt === null;
+      if (isLegacy) {
+        if (!verifyPasswordLegacy(password, user.password_hash)) {
+          reply.status(400).send({ success: false, error: 'Password is incorrect' });
+          return;
+        }
+      } else {
+        if (!await verifyPassword(password, user.auth_salt!, user.password_hash)) {
+          reply.status(400).send({ success: false, error: 'Password is incorrect' });
+          return;
+        }
+      }
+
+      sessions.deleteAllForUser(userId);
       db.deleteDarkreelCreds(userId);
       db.deleteUser(userId);
 
@@ -219,101 +647,86 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
     },
   );
 
-  // --- Change Password ---
-  app.post<{ Body: { oldPassword: string; newPassword: string } }>(
-    '/auth/change-password',
-    {
-      preHandler: authenticate,
-      schema: {
-        body: {
-          type: 'object',
-          required: ['oldPassword', 'newPassword'],
-          properties: {
-            oldPassword: { type: 'string', minLength: 1 },
-            newPassword: { type: 'string', minLength: 16 },
-          },
-          additionalProperties: false,
-        },
-      },
-    },
-    async (request, reply) => {
-      const { sub: userId } = (request as any).user;
-      const { oldPassword, newPassword } = request.body;
-
-      if (!isStrongPassword(newPassword)) {
-        reply.status(400).send({ success: false, error: PASSWORD_REQUIREMENTS });
-        return;
-      }
-
-      const user = db.getUserById(userId);
-      if (!user || !verifyPassword(oldPassword, user.password_hash)) {
-        reply.status(400).send({ success: false, error: 'Current password is incorrect' });
-        return;
-      }
-
-      // Get master key from session
-      const masterKey = sessions.get(userId);
-      if (!masterKey) {
-        reply.status(401).send({ success: false, error: 'Session expired, please re-login' });
-        return;
-      }
-
-      // Re-encrypt master key with new password
-      const newPasswordHash = hashPassword(newPassword);
-      const newSalt = generateSalt();
-      const newUserKey = deriveKeyFromPassword(newPassword, newSalt);
-      const { ciphertext: newEncMasterKey, nonce: newMasterKeyNonce } = encrypt(masterKey, newUserKey);
-      zeroBuffer(newUserKey);
-
-      db.updateUserPassword(userId, newPasswordHash, newSalt, newEncMasterKey, newMasterKeyNonce, PBKDF2_ITERATIONS);
-
-      reply.send({ success: true });
-    },
-  );
-
   return { authenticate, requireAdmin };
 }
 
 /**
- * Bootstrap: create admin user and generate master key on first run.
+ * Bootstrap: create admin user on first run.
+ * Returns the recovery code (base64url-encoded) for logging.
  */
-export function bootstrapAdmin(db: DB, username: string, password: string): Buffer {
-  const masterKey = generateMasterKey();
+export async function bootstrapAdmin(db: DB, username: string, password: string): Promise<string> {
+  const userId = randomUUID();
+  const userIdBytes = Buffer.from(userId, 'utf-8');
 
-  const passwordHash = hashPassword(password);
-  const salt = generateSalt();
-  const userKey = deriveKeyFromPassword(password, salt);
-  const { ciphertext: encMasterKey, nonce: masterKeyNonce } = encrypt(masterKey, userKey);
-  zeroBuffer(userKey);
+  const authSalt = generateSalt();
+  const kdfSalt = generateSalt();
+  const passwordHash = await hashPassword(password, authSalt);
+
+  const masterKey = generateMasterKey();
+  const kdfKey = await deriveKey(password, kdfSalt);
+  const { ciphertext: encMasterKey, nonce: masterKeyNonce } = encrypt(masterKey, kdfKey, userIdBytes);
+  zeroBuffer(kdfKey);
+
+  const recoveryCode = generateRecoveryCode();
+  const recoveryMK = encryptMasterKeyForRecovery(masterKey, recoveryCode, userIdBytes);
+  const recoveryCodeB64 = recoveryCode.toString('base64url');
+  zeroBuffer(recoveryCode);
+  zeroBuffer(masterKey);
 
   db.createUser({
+    id: userId,
     username,
     passwordHash,
-    passwordSalt: salt,
+    authSalt,
+    passwordSalt: kdfSalt,
     encryptedMasterKey: encMasterKey,
     masterKeyNonce,
+    recoveryMK,
     isAdmin: true,
   });
 
-  return masterKey;
+  return recoveryCodeB64;
 }
 
 /**
- * Create a new user with the shared master key (called by admin).
+ * Create a new user with an independent master key (called by admin).
+ * Returns { userId, recoveryCode } — recovery code is base64url-encoded.
  */
-export function createUser(db: DB, masterKey: Buffer, username: string, password: string, isAdmin: boolean = false): string {
-  const passwordHash = hashPassword(password);
-  const salt = generateSalt();
-  const userKey = deriveKeyFromPassword(password, salt);
-  const { ciphertext: encMasterKey, nonce: masterKeyNonce } = encrypt(masterKey, userKey);
-  zeroBuffer(userKey);
+export async function createUser(
+  db: DB,
+  username: string,
+  password: string,
+  isAdmin: boolean = false,
+): Promise<{ userId: string; recoveryCode: string }> {
+  const userId = randomUUID();
+  const userIdBytes = Buffer.from(userId, 'utf-8');
 
-  return db.createUser({
+  const authSalt = generateSalt();
+  const kdfSalt = generateSalt();
+  const passwordHash = await hashPassword(password, authSalt);
+
+  const masterKey = generateMasterKey();
+  const kdfKey = await deriveKey(password, kdfSalt);
+  const { ciphertext: encMasterKey, nonce: masterKeyNonce } = encrypt(masterKey, kdfKey, userIdBytes);
+  zeroBuffer(kdfKey);
+
+  const recoveryCode = generateRecoveryCode();
+  const recoveryMK = encryptMasterKeyForRecovery(masterKey, recoveryCode, userIdBytes);
+  const recoveryCodeB64 = recoveryCode.toString('base64url');
+  zeroBuffer(recoveryCode);
+  zeroBuffer(masterKey);
+
+  db.createUser({
+    id: userId,
     username,
     passwordHash,
-    passwordSalt: salt,
+    authSalt,
+    passwordSalt: kdfSalt,
     encryptedMasterKey: encMasterKey,
     masterKeyNonce,
+    recoveryMK,
     isAdmin,
   });
+
+  return { userId, recoveryCode: recoveryCodeB64 };
 }

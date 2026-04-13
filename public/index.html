@@ -7,14 +7,55 @@
   <link rel="stylesheet" href="/css/app.css">
 </head>
 <body>
-  <div id="login-view">
-    <form id="login-form">
+  <div id="login-view" hidden>
+    <div id="auth-container">
       <h1>PPVDA</h1>
-      <input type="text" id="username" placeholder="Username" autocomplete="username" required>
-      <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
-      <button type="submit">Log In</button>
-      <p id="login-error" class="error" hidden></p>
-    </form>
+
+      <!-- Auth tabs -->
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-tab="login">Sign In</button>
+        <button class="auth-tab" data-tab="register" id="register-tab" hidden>Register</button>
+      </div>
+
+      <!-- Login form -->
+      <form id="login-form">
+        <input type="text" id="username" placeholder="Username" autocomplete="username" required>
+        <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
+        <button type="submit">Sign In</button>
+        <a href="#" id="recover-link" class="auth-link">Forgot password?</a>
+      </form>
+
+      <!-- Register form -->
+      <form id="register-form" hidden>
+        <input type="text" id="reg-username" placeholder="Username (3-64 alphanumeric)" minlength="3" autocomplete="username" required>
+        <input type="password" id="reg-password" placeholder="Password (16+ chars, letter + number + symbol)" minlength="16" autocomplete="new-password" required>
+        <input type="password" id="reg-password-confirm" placeholder="Confirm password" minlength="16" autocomplete="new-password" required>
+        <button type="submit">Create Account</button>
+      </form>
+
+      <!-- Recovery form -->
+      <form id="recover-form" hidden>
+        <p class="auth-hint">Enter your username, recovery code, and a new password.</p>
+        <input type="text" id="rec-username" placeholder="Username" autocomplete="username" required>
+        <input type="text" id="rec-code" placeholder="Recovery code" autocomplete="off" required>
+        <input type="password" id="rec-password" placeholder="New password (16+ chars)" minlength="16" autocomplete="new-password" required>
+        <input type="password" id="rec-password-confirm" placeholder="Confirm new password" minlength="16" autocomplete="new-password" required>
+        <button type="submit">Reset Password</button>
+        <a href="#" id="back-to-login" class="auth-link">Back to sign in</a>
+      </form>
+
+      <p id="auth-error" class="error" hidden></p>
+    </div>
+  </div>
+
+  <!-- Recovery code overlay (shown after registration, password change, or recovery) -->
+  <div id="recovery-overlay" hidden>
+    <div class="recovery-box">
+      <h2>Recovery Code</h2>
+      <p class="recovery-desc">Save this recovery code in a safe place. It is the <strong>only way</strong> to recover your account if you forget your password. This code will not be shown again.</p>
+      <code id="recovery-code-display"></code>
+      <button id="recovery-dismiss">I've saved my recovery code</button>
+    </div>
   </div>
 
   <div id="app-view" hidden>
@@ -33,13 +74,9 @@
         <div class="submit-row">
           <label class="checkbox-label vpn-toggle" id="vpn-toggle" hidden>
             <input type="checkbox" id="use-vpn" checked> VPN
-            <span class="vpn-location" id="vpn-location"></span>
           </label>
           <label class="checkbox-label">
             <input type="checkbox" id="include-images"> Images
-          </label>
-          <label class="checkbox-label">
-            <input type="checkbox" id="auto-play"> Auto-play
           </label>
           <button type="submit">Extract</button>
         </div>
@@ -72,16 +109,15 @@
 
       <div class="settings-group">
         <h3>Darkreel Integration</h3>
-        <p class="settings-desc">Configure your Darkreel server credentials. They are encrypted and stored securely.</p>
+        <p class="settings-desc" id="dr-desc">Configure your Darkreel server credentials. They are encrypted and stored securely.</p>
+        <p class="settings-desc" id="dr-configured-msg" hidden>Credentials are configured and encrypted.</p>
         <form id="darkreel-form">
           <input type="url" id="dr-server" placeholder="Darkreel server URL" required>
           <input type="text" id="dr-username" placeholder="Darkreel username" autocomplete="off" required>
           <input type="password" id="dr-password" placeholder="Darkreel password" autocomplete="off" required>
-          <div class="settings-actions">
-            <button type="submit">Save Credentials</button>
-            <button type="button" id="dr-remove-btn" class="btn-danger" hidden>Remove</button>
-          </div>
+          <button type="submit">Save Credentials</button>
         </form>
+        <button type="button" id="dr-remove-btn" class="btn-danger" hidden>Remove Credentials</button>
         <p id="dr-status" class="settings-status" hidden></p>
       </div>
 
@@ -117,7 +153,7 @@
       <div class="settings-group">
         <h3>Create User</h3>
         <form id="create-user-form">
-          <input type="text" id="new-user-name" placeholder="Username" minlength="3" autocomplete="off" required>
+          <input type="text" id="new-user-name" placeholder="Username (3-64 alphanumeric)" minlength="3" autocomplete="off" required>
           <input type="password" id="new-user-pass" placeholder="Password (16+ chars, letter + number + symbol)" minlength="16" autocomplete="off" required>
           <label class="checkbox-label">
             <input type="checkbox" id="new-user-admin"> Admin
@@ -125,6 +161,19 @@
           <button type="submit">Create User</button>
         </form>
         <p id="create-user-status" class="settings-status" hidden></p>
+      </div>
+
+      <div class="settings-group" id="registration-section">
+        <h3>Self-Registration</h3>
+        <p class="settings-desc">Allow new users to register without an admin creating their account.</p>
+        <div class="vpn-selector">
+          <select id="registration-select">
+            <option value="false">Disabled</option>
+            <option value="true">Enabled</option>
+          </select>
+          <button type="button" id="registration-save-btn">Save</button>
+        </div>
+        <p id="registration-status" class="settings-status" hidden></p>
       </div>
 
       <div class="settings-group" id="vpn-perms-section" hidden>

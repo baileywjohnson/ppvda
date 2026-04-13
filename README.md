@@ -12,8 +12,9 @@ A privacy-focused video extraction and download service. Paste a URL, extract vi
 - **Darkreel integration** -- Background jobs: download, encrypt via [darkreel-cli](https://github.com/baileywjohnson/darkreel-cli), upload to your encrypted library, delete local file
 - **Mullvad VPN** -- Built-in WireGuard tunnel. All extraction and download traffic routes through Mullvad with country switching from the admin panel.
 - **Proxy support** -- Route traffic through SOCKS4/5 or HTTP/HTTPS proxies as an alternative to Mullvad
-- **Multi-user** -- Per-user accounts with admin-managed user creation. Each user configures their own Darkreel credentials independently.
-- **Encrypted credential storage** -- Darkreel server/username/password encrypted at rest with AES-256-GCM, per-user keys derived from login password
+- **Multi-user** -- Self-registration (admin-toggleable) or admin-managed user creation. Each user gets an independent master key and configures their own Darkreel credentials.
+- **Account recovery** -- Recovery codes generated on registration and password change. The only way to recover an account if the password is forgotten.
+- **Encrypted credential storage** -- Darkreel server/username/password encrypted at rest with AES-256-GCM, per-user master keys with AAD binding
 - **Host filtering** -- Allow, block, or prioritize videos from specific domains
 - **Concurrency control** -- Configurable limits on parallel downloads and extractions
 - **Privacy by design** -- No request logging, no URL retention, no download history. Downloaded files are auto-deleted. Job metadata is cleared on completion.
@@ -44,8 +45,9 @@ The script installs Docker, downloads darkreel-cli, generates a secure `.env`, o
 When it's done:
 
 1. Open `https://your-domain.com` (or `http://server-ip:3000`) and log in
-2. Go to **Settings** and enter your Darkreel server URL, username, and password to enable encrypted uploads
-3. Paste a video URL and click **Extract**
+2. **Save the recovery code** shown in the server logs -- it's the only way to recover your admin account
+3. Go to **Settings** and enter your Darkreel server URL, username, and password to enable encrypted uploads
+4. Paste a video URL and click **Extract**
 
 ### What the script sets up
 
@@ -169,38 +171,50 @@ sudo ./setup.sh
 | Video URLs | No | Only in browser memory during extraction |
 | Downloaded files | No | Auto-deleted after job completion |
 | Download history | No | Job metadata cleared from memory when jobs finish |
-| Darkreel credentials | Encrypted at rest | AES-256-GCM, per-user key derived from password |
+| Darkreel credentials | Encrypted at rest | AES-256-GCM, per-user master key with AAD binding |
 | Usernames | Yes (plaintext) | Use non-identifying usernames |
-| Passwords | Hashed (scrypt) | Random 32-byte salt per user |
+| Passwords | Hashed (Argon2id) | Separate auth salt per user (t=3, m=64MB, p=4) |
+| Master keys | Encrypted at rest | Encrypted with password-derived key + recovery code |
 
 ### Security measures
 
 - **TLS required** -- PPVDA does not handle TLS. Deploy behind a reverse proxy or access over a secure tunnel only.
-- **Credential encryption** -- Each user's Darkreel credentials are encrypted with AES-256-GCM using a master key that only exists in RAM during their session. The master key is derived from their password via PBKDF2-SHA256 (600,000 iterations).
+- **Argon2id password hashing** -- Memory-hard hashing with parameters matching Darkreel (t=3, m=64MB, p=4, keyLen=32). Dual salts: separate auth salt for password hash and KDF salt for master key encryption.
+- **Authenticated encryption** -- All master key encryption uses AES-256-GCM with Additional Authenticated Data (AAD) binding encrypted keys to their owner's user ID, preventing ciphertext substitution between users.
+- **Recovery codes** -- 32-byte random codes generated on registration and rotated on every password change. Master key is independently encrypted with the recovery code. Recovery codes are shown once and never stored in plaintext.
+- **Timing-safe authentication** -- Dummy Argon2id derivation performed for non-existent usernames, preventing timing-based username enumeration.
+- **Per-username rate limiting** -- 10 login/recovery attempts per username per 15 minutes, defending against distributed brute-force even when per-IP limits are bypassed.
+- **Session isolation** -- Sessions indexed by random session ID (not user ID), with session ID embedded in JWT. Password changes and recovery invalidate all existing sessions.
 - **SSRF protection** -- All user-provided URLs are validated against private IP ranges, IPv6 loopback/link-local/unique-local, and IPv4-mapped IPv6 addresses. DNS resolution is checked twice to detect rebinding attacks. DNS failures are rejected (fail-closed).
 - **No shell injection** -- All subprocesses (ffmpeg, darkreel-cli) are spawned with argument arrays, never through a shell. Credentials are passed via environment variables.
-- **Rate limiting** -- 100 requests/min globally, 10/min on extraction and job submission endpoints.
+- **Rate limiting** -- 100 requests/min globally, 5/min on login/register/recover endpoints.
 - **Concurrency limits** -- Max 3 concurrent Playwright extractions and 3 concurrent downloads (configurable).
 - **Cookie security** -- httpOnly, SameSite=strict, Secure in production. No tokens in localStorage or query parameters.
 - **Minimal subprocess environment** -- ffmpeg and darkreel-cli receive only PATH, HOME, and TMPDIR. Secrets like JWT_SECRET and MULLVAD_ACCOUNT are not leaked.
 - **Security headers** -- CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy on all responses.
 - **No request logging** -- URLs never appear in server logs.
+- **Memory security** -- Master keys, derived keys, and passwords are zeroed from memory immediately after use. Session cleanup runs every 60 seconds to evict expired sessions.
 
 ### Credential encryption model
 
 ```
-User Password --> PBKDF2 (600k iterations) --> user_key
-                                                  |
-                              Decrypts: encrypted_master_key (per-user, in DB)
-                                                  |
-                                              master_key (RAM only)
-                                                  |
-                              Decrypts: darkreel_creds (per-user, in DB)
+                  ┌─── Argon2id(password, auth_salt) ──> password_hash (authentication)
+User Password ────┤
+                  └─── Argon2id(password, kdf_salt) ──> kdf_key
+                                                           |
+                                  Decrypts: encrypted_master_key (AES-256-GCM, AAD=userID)
+                                                           |
+                                                       master_key (RAM only)
+                                                           |
+                                  Decrypts: darkreel_creds (AES-256-GCM, per-user, in DB)
+
+Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> master_key
 ```
 
-- Database stolen? Encrypted blobs are useless without a user's password.
+- Database stolen? Encrypted blobs are useless without a user's password or recovery code.
 - Server compromised? Attacker cannot retroactively decrypt stored credentials.
 - Server restarted? All sessions cleared, users must re-login.
+- Forgot password? Recovery code decrypts the master key, allowing a full password reset.
 
 ### VPN privacy
 
@@ -213,16 +227,21 @@ User Password --> PBKDF2 (600k iterations) --> user_key
 
 - 16-128 characters
 - Must contain at least one letter, one number, and one symbol
+- No whitespace allowed
 
 ## User management
 
 ### Admin bootstrap
 
-On first startup, if the database is empty, PPVDA creates an admin user from `PPVDA_ADMIN_USERNAME` and `PPVDA_ADMIN_PASSWORD`. After this, the env vars are not used for authentication -- the database is authoritative.
+On first startup, if the database is empty, PPVDA creates an admin user from `PPVDA_ADMIN_USERNAME` and `PPVDA_ADMIN_PASSWORD`. A recovery code is logged to the console -- save it immediately. After this, the env vars are not used for authentication -- the database is authoritative.
 
-### Creating users
+### Self-registration
 
-Only admins can create users via the **Admin** panel in the web UI or the API:
+Admins can enable self-registration from the **Admin** panel. When enabled, a **Register** tab appears on the login page. New users receive a recovery code on registration that must be saved immediately. Registration is disabled by default.
+
+### Creating users (admin)
+
+Admins can create users via the **Admin** panel in the web UI or the API:
 
 ```bash
 curl -X POST https://your-domain.com/admin/users \
@@ -230,6 +249,12 @@ curl -X POST https://your-domain.com/admin/users \
   -H 'Content-Type: application/json' \
   -d '{"username": "alice", "password": "SecureP@ssw0rd123"}'
 ```
+
+The response includes a `recovery_code` that must be given to the user.
+
+### Account recovery
+
+If a user forgets their password, they can reset it using their recovery code via the **Forgot password?** link on the login page. Recovery codes are rotated on every password change and recovery -- the old code is invalidated and a new one is displayed.
 
 ## Darkreel integration
 
@@ -316,15 +341,18 @@ Comma-separated domain lists with subdomain matching.
 
 ## API
 
-All endpoints except `/health` and `/auth/login` require authentication.
+All endpoints except `/health`, `/auth/login`, `/auth/register`, `/auth/recover`, and `/auth/registration` require authentication.
 
 ### Auth
 
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/auth/login` | Login (returns JWT, sets httpOnly cookie) |
+| POST | `/auth/register` | Self-registration (when enabled by admin) |
+| POST | `/auth/recover` | Reset password with recovery code |
+| GET | `/auth/registration` | Check if self-registration is enabled |
 | POST | `/auth/logout` | Logout (clears session and cookie) |
-| POST | `/auth/change-password` | Change password |
+| POST | `/auth/change-password` | Change password (returns new recovery code) |
 | DELETE | `/auth/account` | Delete your account |
 
 ### Extraction
@@ -362,8 +390,9 @@ All endpoints except `/health` and `/auth/login` require authentication.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/admin/users` | List users |
-| POST | `/admin/users` | Create user |
+| POST | `/admin/users` | Create user (returns recovery code) |
 | DELETE | `/admin/users/:id` | Delete user |
+| POST | `/admin/registration` | Enable/disable self-registration |
 | GET | `/admin/vpn/relays` | List VPN countries/cities |
 | POST | `/admin/vpn/switch` | Switch VPN country |
 | PUT | `/admin/vpn/default` | Set server-wide VPN default |

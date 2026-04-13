@@ -22,16 +22,19 @@ async function main() {
       throw new Error('PPVDA_ADMIN_PASSWORD must be set for first-run admin bootstrap');
     }
     if (!isStrongPassword(config.adminPassword)) {
-      throw new Error('PPVDA_ADMIN_PASSWORD must be 16+ characters with at least one letter, one number, and one symbol');
+      throw new Error('PPVDA_ADMIN_PASSWORD must be 16+ characters with at least one letter, one number, and one symbol (no spaces)');
     }
-    const masterKey = bootstrapAdmin(db, config.adminUsername, config.adminPassword);
-    // Zero the master key — it will be decrypted on login
-    masterKey.fill(0);
+    const recoveryCode = await bootstrapAdmin(db, config.adminUsername, config.adminPassword);
     logger.info({ username: config.adminUsername }, 'Admin user created');
+    logger.info('='.repeat(60));
+    logger.info('SAVE THIS RECOVERY CODE — it will not be shown again:');
+    logger.info(recoveryCode);
+    logger.info('='.repeat(60));
   }
 
-  // Initialize session store
+  // Initialize session store with background cleanup
   const sessions = new SessionStore();
+  sessions.startCleanup();
 
   // Set up Mullvad WireGuard tunnel if configured
   if (config.mullvadAccount) {

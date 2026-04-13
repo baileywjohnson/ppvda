@@ -7,10 +7,12 @@ export interface UserRow {
   id: string;
   username: string;
   password_hash: string;
-  password_salt: Buffer;
+  auth_salt: Buffer | null;       // Argon2id auth salt (null = legacy scrypt user)
+  password_salt: Buffer;           // KDF salt (for master key encryption)
   encrypted_master_key: Buffer;
   master_key_nonce: Buffer;
   kdf_iterations: number;
+  recovery_mk: Buffer | null;     // recovery-code-encrypted master key
   is_admin: number;
   created_at: string;
 }
@@ -55,12 +57,33 @@ export class DB {
       // Column already exists
     }
 
+    // Add auth_salt column (null = legacy scrypt user, set = Argon2id user)
+    try {
+      this.db.exec(`ALTER TABLE users ADD COLUMN auth_salt BLOB`);
+    } catch {
+      // Column already exists
+    }
+
+    // Add recovery_mk column (recovery-code-encrypted master key)
+    try {
+      this.db.exec(`ALTER TABLE users ADD COLUMN recovery_mk BLOB`);
+    } catch {
+      // Column already exists
+    }
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS darkreel_creds (
         user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
         encrypted_data BLOB NOT NULL,
         nonce BLOB NOT NULL,
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       );
     `);
   }
@@ -88,34 +111,49 @@ export class DB {
   }
 
   createUser(opts: {
+    id?: string;
     username: string;
     passwordHash: string;
+    authSalt: Buffer | null;
     passwordSalt: Buffer;
     encryptedMasterKey: Buffer;
     masterKeyNonce: Buffer;
+    recoveryMK: Buffer | null;
     isAdmin: boolean;
     kdfIterations?: number;
   }): string {
-    const id = randomUUID();
+    const id = opts.id ?? randomUUID();
     this.db.prepare(`
-      INSERT INTO users (id, username, password_hash, password_salt, encrypted_master_key, master_key_nonce, kdf_iterations, is_admin)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, opts.username, opts.passwordHash, opts.passwordSalt, opts.encryptedMasterKey, opts.masterKeyNonce, opts.kdfIterations ?? 600000, opts.isAdmin ? 1 : 0);
+      INSERT INTO users (id, username, password_hash, auth_salt, password_salt, encrypted_master_key, master_key_nonce, kdf_iterations, recovery_mk, is_admin)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, opts.username, opts.passwordHash, opts.authSalt, opts.passwordSalt,
+      opts.encryptedMasterKey, opts.masterKeyNonce, opts.kdfIterations ?? 600000,
+      opts.recoveryMK, opts.isAdmin ? 1 : 0,
+    );
     return id;
   }
 
-  updateUserPassword(userId: string, passwordHash: string, passwordSalt: Buffer, encryptedMasterKey: Buffer, masterKeyNonce: Buffer, kdfIterations?: number) {
+  /**
+   * Atomic update of all auth fields (password change, recovery, legacy upgrade).
+   */
+  updateUserAuth(userId: string, opts: {
+    passwordHash: string;
+    authSalt: Buffer;
+    passwordSalt: Buffer;
+    encryptedMasterKey: Buffer;
+    masterKeyNonce: Buffer;
+    recoveryMK: Buffer;
+  }) {
     this.db.prepare(`
-      UPDATE users SET password_hash = ?, password_salt = ?, encrypted_master_key = ?, master_key_nonce = ?, kdf_iterations = ?
+      UPDATE users
+      SET password_hash = ?, auth_salt = ?, password_salt = ?, encrypted_master_key = ?,
+          master_key_nonce = ?, recovery_mk = ?, kdf_iterations = 600000
       WHERE id = ?
-    `).run(passwordHash, passwordSalt, encryptedMasterKey, masterKeyNonce, kdfIterations ?? 600000, userId);
-  }
-
-  updateUserKdf(userId: string, passwordSalt: Buffer, encryptedMasterKey: Buffer, masterKeyNonce: Buffer, kdfIterations: number) {
-    this.db.prepare(`
-      UPDATE users SET password_salt = ?, encrypted_master_key = ?, master_key_nonce = ?, kdf_iterations = ?
-      WHERE id = ?
-    `).run(passwordSalt, encryptedMasterKey, masterKeyNonce, kdfIterations, userId);
+    `).run(
+      opts.passwordHash, opts.authSalt, opts.passwordSalt,
+      opts.encryptedMasterKey, opts.masterKeyNonce, opts.recoveryMK, userId,
+    );
   }
 
   deleteUser(userId: string): boolean {
@@ -145,5 +183,19 @@ export class DB {
   hasDarkreelCreds(userId: string): boolean {
     const row = this.db.prepare('SELECT 1 FROM darkreel_creds WHERE user_id = ?').get(userId);
     return !!row;
+  }
+
+  // --- Settings ---
+
+  getSetting(key: string): string | undefined {
+    const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value;
+  }
+
+  setSetting(key: string, value: string): void {
+    this.db.prepare(`
+      INSERT INTO settings (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, value);
   }
 }
