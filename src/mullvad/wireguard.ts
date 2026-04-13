@@ -14,11 +14,25 @@ const WG_PORT = 51820;
 /**
  * Generate a WireGuard config file for connecting to a Mullvad relay.
  */
-export function generateWgConfig(device: DeviceInfo, server: RelayServer): string {
+export function generateWgConfig(device: DeviceInfo, server: RelayServer, gateway: string | null): string {
+  // Table = off prevents wg-quick from using fwmark-based policy routing,
+  // which requires the net.ipv4.conf.all.src_valid_mark sysctl (a global
+  // kernel parameter that can only be set from a privileged container).
+  // Instead, PostUp/PreDown manage routes directly.
+  //
+  // We must add explicit routes for:
+  // 1. The relay server's IP — so WireGuard UDP packets reach it via the
+  //    original gateway instead of looping through the tunnel.
+  // 2. api.mullvad.net (146.70.25.66) — so relay list fetches and device
+  //    management still work after the tunnel replaces the default route.
+  const gw = gateway ?? '172.17.0.1';
   return `[Interface]
 PrivateKey = ${device.privateKey}
 Address = ${device.ipv4Address}
 DNS = 10.64.0.1
+Table = off
+PostUp = ip route add ${server.ipv4AddrIn}/32 via ${gw} && ip route replace default dev ${WG_INTERFACE}
+PreDown = ip route del default dev ${WG_INTERFACE} ; ip route del ${server.ipv4AddrIn}/32 via ${gw}
 
 [Peer]
 PublicKey = ${server.publicKey}

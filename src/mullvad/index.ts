@@ -69,17 +69,18 @@ export async function setupMullvad(
   // Capture default gateway BEFORE tunnel overrides routing
   const gateway = await getDefaultGateway();
 
-  // Resolve bypass hostnames BEFORE tunnel starts (while Docker DNS is available)
+  // Resolve bypass hostnames BEFORE tunnel starts (while Docker DNS is available).
+  // Always include api.mullvad.net so relay list fetches and device management
+  // work after the tunnel replaces the default route.
+  const allBypassHosts = ['api.mullvad.net', ...(bypassHosts ?? [])];
   const resolvedBypasses: Array<{ hostname: string; ips: string[] }> = [];
-  if (bypassHosts?.length) {
-    for (const host of bypassHosts) {
-      const ips = await resolveBypassHost(host);
-      if (ips.length > 0) {
-        resolvedBypasses.push({ hostname: host, ips });
-        logger.info({ host, ips }, 'Resolved VPN bypass host');
-      } else {
-        logger.warn({ host }, 'Could not resolve VPN bypass host');
-      }
+  for (const host of allBypassHosts) {
+    const ips = await resolveBypassHost(host);
+    if (ips.length > 0) {
+      resolvedBypasses.push({ hostname: host, ips });
+      logger.info({ host, ips }, 'Resolved VPN bypass host');
+    } else {
+      logger.warn({ host }, 'Could not resolve VPN bypass host');
     }
   }
 
@@ -92,7 +93,7 @@ export async function setupMullvad(
   try { await stopTunnel(config.configDir); } catch { /* may not exist — fine */ }
 
   // Generate config and start tunnel
-  const wgConfig = generateWgConfig(device, server);
+  const wgConfig = generateWgConfig(device, server, gateway);
   await startTunnel(config.configDir, wgConfig);
 
   logger.info('WireGuard tunnel is up — all traffic routed through Mullvad');
@@ -157,13 +158,12 @@ export async function switchMullvadCountry(
     // Capture gateway before new tunnel
     const gateway = await getDefaultGateway();
 
-    // Resolve bypasses
+    // Resolve bypasses (always include api.mullvad.net)
+    const allSwitchBypasses = ['api.mullvad.net', ...(bypassHosts ?? [])];
     const resolvedBypasses: Array<{ hostname: string; ips: string[] }> = [];
-    if (bypassHosts?.length) {
-      for (const host of bypassHosts) {
-        const ips = await resolveBypassHost(host);
-        if (ips.length > 0) resolvedBypasses.push({ hostname: host, ips });
-      }
+    for (const host of allSwitchBypasses) {
+      const ips = await resolveBypassHost(host);
+      if (ips.length > 0) resolvedBypasses.push({ hostname: host, ips });
     }
 
     // Find new relay
@@ -171,7 +171,7 @@ export async function switchMullvadCountry(
     const { country, city, server } = findRelay(relays, location);
 
     // Start new tunnel
-    const wgConfig = generateWgConfig(activeDevice, server);
+    const wgConfig = generateWgConfig(activeDevice, server, gateway);
     await startTunnel(activeConfig.configDir, wgConfig);
 
     // Update stored location
