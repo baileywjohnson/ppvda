@@ -18,9 +18,9 @@ jobs:
           COMMIT_SHA="${{ github.sha }}"
           printf '%s' "$COMMIT_SHA" > commit.hash
 
-          # Write key to temp file, sign, then shred immediately
+          # Write key to temp file (with trailing newline), sign, then shred
           KEYFILE=$(mktemp)
-          printf '%s' "$SIGNING_KEY" > "$KEYFILE"
+          printf '%s\n' "$SIGNING_KEY" > "$KEYFILE"
           openssl pkeyutl -sign -inkey "$KEYFILE" -rawin -in commit.hash -out commit.sig
           shred -u "$KEYFILE"
 
