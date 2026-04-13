@@ -18,16 +18,9 @@ jobs:
           COMMIT_SHA="${{ github.sha }}"
           printf '%s' "$COMMIT_SHA" > commit.hash
 
-          # Write key to temp file, sign, then shred
+          # Decode base64-encoded key to temp file, sign, then shred
           KEYFILE=$(mktemp)
-          printf '%s\n' "$SIGNING_KEY" > "$KEYFILE"
-
-          # Debug: show file structure without revealing key content
-          echo "Key file lines: $(wc -l < "$KEYFILE")"
-          echo "Key file bytes: $(wc -c < "$KEYFILE")"
-          head -1 "$KEYFILE"
-          tail -1 "$KEYFILE"
-
+          printf '%s' "$SIGNING_KEY" | base64 -d > "$KEYFILE"
           openssl pkeyutl -sign -inkey "$KEYFILE" -rawin -in commit.hash -out commit.sig
           shred -u "$KEYFILE"
 
