@@ -105,12 +105,17 @@ if [ -n "$DOMAIN" ]; then
   [ "$DISABLE_ACCESS_LOGS_INPUT" = "n" ] || [ "$DISABLE_ACCESS_LOGS_INPUT" = "N" ] && DISABLE_ACCESS_LOGS="n"
 fi
 
+AUTO_UPDATE="n"
+echo ""
+read -rp "Enable auto-updates? (daily check for new releases) [y/N]: " AUTO_UPDATE
+
 echo ""
 info "Admin user:  $ADMIN_USER"
 [ -n "$DOMAIN" ]           && info "Domain:      $DOMAIN"
 [ -n "$MULLVAD_ACCOUNT" ]  && info "Mullvad:     $MULLVAD_LOCATION"
 [ -n "$DARKREEL_URL" ]     && info "Darkreel:    $DARKREEL_URL"
 [ -n "$SSH_USER" ]         && info "SSH user:    $SSH_USER"
+[ "$AUTO_UPDATE" = "y" ] || [ "$AUTO_UPDATE" = "Y" ] && info "Auto-update: enabled"
 echo ""
 
 # ============================================================
@@ -458,6 +463,19 @@ sed -i "s|REPODIR|${REPO_DIR}|g" /etc/cron.d/ppvda-backup
 info "Daily encrypted database backup configured (3 AM, 30-day retention)"
 
 # ============================================================
+# AUTO-UPDATES (optional)
+# ============================================================
+
+if [ "$AUTO_UPDATE" = "y" ] || [ "$AUTO_UPDATE" = "Y" ]; then
+  if [ -f "${REPO_DIR}/update.sh" ]; then
+    chmod +x "${REPO_DIR}/update.sh"
+    "${REPO_DIR}/update.sh" --install
+  else
+    warn "update.sh not found in repo — skipping auto-update setup"
+  fi
+fi
+
+# ============================================================
 # BUILD AND START
 # ============================================================
 
@@ -540,6 +558,7 @@ if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
   [ -n "$MULLVAD_ACCOUNT" ] && echo "    - Mullvad VPN (${MULLVAD_LOCATION})"
   [ -n "$SSH_USER" ] && echo "    - SSH user '$SSH_USER' with sudo access"
   [ -n "$SSH_USER" ] && echo "    - Root SSH login disabled"
+  [ "$AUTO_UPDATE" = "y" ] || [ "$AUTO_UPDATE" = "Y" ] && echo "    - Auto-updates from main branch (daily at 4 AM)"
   echo ""
   echo "  Useful commands:"
   echo "    docker compose logs -f        # follow logs"

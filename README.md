@@ -97,11 +97,23 @@ openssl enc -d -aes-256-cbc -pbkdf2 \
 
 ### Upgrading
 
+Manual:
+
 ```bash
 cd /opt/ppvda
 git pull
 docker compose up --build -d
 ```
+
+Or use the auto-updater:
+
+```bash
+sudo ./update.sh              # check once
+sudo ./update.sh --install    # daily cron at 4 AM
+sudo ./update.sh --uninstall  # remove cron
+```
+
+Auto-updates can also be enabled during `setup.sh`. When installed, PPVDA checks for new commits on `main` daily at 4 AM, pulls, rebuilds, and runs a health check. Logs are written to `/var/log/ppvda-update.log`.
 
 ## Quick start (manual Docker)
 
