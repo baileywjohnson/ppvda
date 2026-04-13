@@ -12,6 +12,7 @@ services:
       - ./data:/app/data
       - ./mullvad:/app/mullvad
     # Required for WireGuard tunnel (Mullvad)
-    privileged: true
+    cap_add:
+      - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun

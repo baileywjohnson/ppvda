@@ -52,10 +52,21 @@ export async function downloadRoutes(
         throw new ExtractionError('VPN is switching countries, try again in a moment', 'VPN_SWITCHING');
       }
 
-      // Block private/internal URLs
+      // Validate URL protocol and block private/internal targets
       const urlToCheck = videoUrl ?? url;
-      if (urlToCheck && await isPrivateUrl(urlToCheck)) {
-        throw new ExtractionError('Private/internal URLs are not allowed', 'PRIVATE_URL_BLOCKED');
+      if (urlToCheck) {
+        try {
+          const parsed = new URL(urlToCheck);
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            throw new ExtractionError('Only http/https URLs are supported', 'INVALID_PROTOCOL');
+          }
+        } catch (err) {
+          if (err instanceof ExtractionError) throw err;
+          throw new ExtractionError('Invalid URL', 'INVALID_URL');
+        }
+        if (await isPrivateUrl(urlToCheck)) {
+          throw new ExtractionError('Private/internal URLs are not allowed', 'PRIVATE_URL_BLOCKED');
+        }
       }
 
       let targetUrl: string;

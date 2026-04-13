@@ -95,6 +95,16 @@ async function getBrowser(proxy?: ProxyConfig): Promise<Browser> {
       headless: true,
       args: [
         '--disable-blink-features=AutomationControlled',
+        // Block direct navigation to private/reserved IP addresses (SSRF defense-in-depth).
+        // DNS rebinding is handled by isPrivateUrl double-resolve at the route level.
+        '--host-rules='
+          + 'MAP 127.* ~NOTFOUND, '
+          + 'MAP 10.* ~NOTFOUND, '
+          + 'MAP 192.168.* ~NOTFOUND, '
+          + 'MAP 169.254.* ~NOTFOUND, '
+          + 'MAP 0.* ~NOTFOUND, '
+          + 'MAP [::1] ~NOTFOUND, '
+          + 'MAP [::] ~NOTFOUND',
       ],
       ...(proxy ? { proxy: getPlaywrightProxy(proxy) } : {}),
     });

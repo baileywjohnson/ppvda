@@ -2,6 +2,7 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import type { DB } from '../../db/index.js';
 import type { SessionStore } from '../../auth/sessions.js';
 import { encryptJSON, decryptJSON, zeroBuffer } from '../../crypto/index.js';
+import { isPrivateUrl } from '../../utils/url.js';
 
 export interface DarkreelCreds {
   server: string;
@@ -49,6 +50,18 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
     async (request, reply) => {
       const userId = (request as any).user.sub;
       const { server, username, password } = request.body;
+
+      // Block SSRF — prevent testing against private/internal addresses.
+      // Allow Docker internal hostnames (host.docker.internal, gateway.docker.internal,
+      // host.containers.internal) since Darkreel often runs on the Docker host.
+      const serverHostname = (() => { try { return new URL(server).hostname.toLowerCase(); } catch { return ''; } })();
+      const isDockerInternal = serverHostname === 'host.docker.internal'
+        || serverHostname === 'gateway.docker.internal'
+        || serverHostname === 'host.containers.internal';
+      if (!isDockerInternal && await isPrivateUrl(server)) {
+        reply.status(400).send({ success: false, error: 'Private/internal server URLs are not allowed' });
+        return;
+      }
 
       // Test connection before saving
       try {

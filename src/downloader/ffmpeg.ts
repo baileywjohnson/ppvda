@@ -37,6 +37,7 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
 
   const args = [
     '-y',                    // overwrite output
+    '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
     '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     '-i', inputUrl,          // input URL
     '-c', 'copy',            // copy codecs (no re-encoding)
@@ -125,6 +126,7 @@ export function spawnFfmpegStream(options: FfmpegStreamOptions): {
 
   const args = options.args ?? [
     '-y',
+    '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
     '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     '-i', inputUrl,
     '-c', 'copy',

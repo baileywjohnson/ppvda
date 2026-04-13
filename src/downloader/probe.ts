@@ -36,6 +36,7 @@ export async function probeVideo(options: {
 
   const args = [
     '-v', 'quiet',
+    '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
     '-print_format', 'json',
     '-show_format',
     '-show_streams',

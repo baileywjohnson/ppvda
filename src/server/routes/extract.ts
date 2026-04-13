@@ -41,6 +41,17 @@ export async function extractRoutes(
         return;
       }
 
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          reply.status(400).send({ success: false, error: 'Only http/https URLs are supported' });
+          return;
+        }
+      } catch {
+        reply.status(400).send({ success: false, error: 'Invalid URL' });
+        return;
+      }
+
       if (await isPrivateUrl(url)) {
         reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
         return;
@@ -79,6 +90,19 @@ export async function extractRoutes(
 
       if (proxy && isVpnSwitching()) {
         reply.status(503).send({ success: false, error: 'VPN is switching countries, try again in a moment' });
+        return;
+      }
+
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          reply.raw.writeHead(400, { 'Content-Type': 'application/json' });
+          reply.raw.end(JSON.stringify({ success: false, error: 'Only http/https URLs are supported' }));
+          return;
+        }
+      } catch {
+        reply.raw.writeHead(400, { 'Content-Type': 'application/json' });
+        reply.raw.end(JSON.stringify({ success: false, error: 'Invalid URL' }));
         return;
       }
 
