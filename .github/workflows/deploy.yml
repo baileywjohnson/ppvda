@@ -15,11 +15,14 @@ jobs:
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
         run: |
-          # Hash the commit SHA and sign it — key passed via fd, never written to disk
           COMMIT_SHA="${{ github.sha }}"
           printf '%s' "$COMMIT_SHA" > commit.hash
-          openssl pkeyutl -sign -inkey <(printf '%s' "$SIGNING_KEY") \
-            -rawin -in commit.hash -out commit.sig
+
+          # Write key to temp file, sign, then shred immediately
+          KEYFILE=$(mktemp)
+          printf '%s' "$SIGNING_KEY" > "$KEYFILE"
+          openssl pkeyutl -sign -inkey "$KEYFILE" -rawin -in commit.hash -out commit.sig
+          shred -u "$KEYFILE"
 
           echo "Signed commit: $COMMIT_SHA"
 
