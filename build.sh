@@ -18,8 +18,8 @@ APP_HASH="sha384-$(openssl dgst -sha384 -binary public/js/app.js | openssl base6
 
 # Generate short content hashes for cache-busting query parameters.
 # When file content changes, the ?v= param changes, busting browser caches.
-CSS_VER=$(openssl dgst -sha256 -binary public/css/app.css | xxd -p -l 8)
-APP_VER=$(openssl dgst -sha256 -binary public/js/app.js | xxd -p -l 8)
+CSS_VER=$(openssl dgst -sha256 public/css/app.css | awk '{print $NF}' | cut -c1-16)
+APP_VER=$(openssl dgst -sha256 public/js/app.js | awk '{print $NF}' | cut -c1-16)
 
 # Update integrity attributes and cache-busting version params in index.html.
 perl -i -pe "s|href=\"/css/app\.css(\?v=[a-f0-9]+)?\"(.*?)integrity=\"sha384-[A-Za-z0-9+/=]+\"|href=\"/css/app.css?v=${CSS_VER}\"\2integrity=\"${CSS_HASH}\"|" public/index.html
