@@ -940,6 +940,10 @@
     settingsSection.hidden = true;
     adminSection.hidden = false;
     sessionStorage.setItem('ppvda_view', 'admin');
+    if (vpnAvailable) {
+      $('#vpn-perms-section').hidden = false;
+      $('#vpn-admin-section').hidden = false;
+    }
     const tasks = [loadUsers(), loadRegistrationStatus()];
     if (vpnAvailable) {
       tasks.push(loadVpnRelays(), loadVpnPermissions());
