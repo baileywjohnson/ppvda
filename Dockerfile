@@ -45,6 +45,8 @@ RUN curl -fsSL -o /usr/local/bin/darkreel-cli \
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY public/ ./public/
+COPY build.sh ./
+RUN bash build.sh && rm build.sh
 COPY package.json ./
 
 # Create non-root user (used when Mullvad/WireGuard is NOT needed)
