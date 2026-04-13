@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎭</text></svg>">
   <title>PPVDA</title>
-  <link rel="stylesheet" href="/css/app.css?v=958871c63d508442" integrity="sha384-276wSihuiuxnxJakCoh8x3iFFTFS9yL3J8JwA4rsI7KhVgxMq/pGRDVFVXwyv2yD" crossorigin="anonymous">
+  <link rel="stylesheet" href="/css/app.css?v=eyLH2pDy" integrity="sha384-eyLH2pDyvWMbq0jMvxFM9dDJo3BfX9AYnkDOXeYWXy6ZvLEgjxrrK2eZoNJoGhgI" crossorigin="anonymous">
 </head>
 <body>
   <div id="login-view" hidden>
@@ -20,7 +20,7 @@
 
       <!-- Login form -->
       <form id="login-form">
-        <input type="text" id="username" placeholder="Username" autocomplete="username" required>
+        <input type="text" id="username" placeholder="Username" autocomplete="username" autocapitalize="off" required>
         <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
         <button type="submit">Sign In</button>
         <a href="#" id="recover-link" class="auth-link">Forgot password?</a>
@@ -28,7 +28,7 @@
 
       <!-- Register form -->
       <form id="register-form" hidden>
-        <input type="text" id="reg-username" placeholder="Username (3-64 alphanumeric)" minlength="3" autocomplete="username" required>
+        <input type="text" id="reg-username" placeholder="Username (3-64 alphanumeric)" minlength="3" autocomplete="username" autocapitalize="off" required>
         <input type="password" id="reg-password" placeholder="Password (16+ chars, letter + number + symbol)" minlength="16" autocomplete="new-password" required>
         <input type="password" id="reg-password-confirm" placeholder="Confirm password" minlength="16" autocomplete="new-password" required>
         <button type="submit">Create Account</button>
@@ -37,7 +37,7 @@
       <!-- Recovery form -->
       <form id="recover-form" hidden>
         <p class="auth-hint">Enter your username, recovery code, and a new password.</p>
-        <input type="text" id="rec-username" placeholder="Username" autocomplete="username" required>
+        <input type="text" id="rec-username" placeholder="Username" autocomplete="username" autocapitalize="off" required>
         <input type="text" id="rec-code" placeholder="Recovery code" autocomplete="off" required>
         <input type="password" id="rec-password" placeholder="New password (16+ chars)" minlength="16" autocomplete="new-password" required>
         <input type="password" id="rec-password-confirm" placeholder="Confirm new password" minlength="16" autocomplete="new-password" required>
@@ -212,6 +212,6 @@
     </section>
   </div>
 
-  <script src="/js/app.js?v=975e7b45c7403659" integrity="sha384-mDAk8gP/zlLrkQLzGVhfMAVUugRXXRirqff3M48hwBceorycaUPqUAPzl6PDOqyh" crossorigin="anonymous"></script>
+  <script src="/js/app.js?v=jM2tYIkN" integrity="sha384-jM2tYIkN5hV/gLcGrmReNcgnBROp1fO5QFOgXH/KgFbUOCDwo+MM45WdKDvRLT8u" crossorigin="anonymous"></script>
 </body>
 </html>

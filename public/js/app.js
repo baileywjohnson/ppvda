@@ -53,6 +53,17 @@
   let extractionResult = null;
   let extractAbort = null;
 
+  function btnLoading(btn) {
+    btn.disabled = true;
+    btn.dataset.origText = btn.textContent;
+    btn.innerHTML = '<div class="btn-spinner"></div>';
+  }
+
+  function btnReset(btn) {
+    btn.textContent = btn.dataset.origText || '';
+    btn.disabled = false;
+  }
+
   // --- Init ---
   checkRegistrationStatus();
   tryEnterApp();
@@ -114,7 +125,7 @@
     e.preventDefault();
     authError.hidden = true;
     const btn = loginForm.querySelector('button');
-    btn.disabled = true;
+    btnLoading(btn);
 
     try {
       const res = await fetch('/auth/login', {
@@ -140,7 +151,7 @@
       authError.textContent = 'Connection failed';
       authError.hidden = false;
     } finally {
-      btn.disabled = false;
+      btnReset(btn);
     }
   });
 
@@ -158,7 +169,7 @@
     }
 
     const btn = registerForm.querySelector('button');
-    btn.disabled = true;
+    btnLoading(btn);
 
     try {
       const res = await fetch('/auth/register', {
@@ -190,7 +201,7 @@
       authError.textContent = 'Connection failed';
       authError.hidden = false;
     } finally {
-      btn.disabled = false;
+      btnReset(btn);
     }
   });
 
@@ -208,7 +219,7 @@
     }
 
     const btn = recoverForm.querySelector('button');
-    btn.disabled = true;
+    btnLoading(btn);
 
     try {
       const res = await fetch('/auth/recover', {
@@ -242,7 +253,7 @@
       authError.textContent = 'Connection failed';
       authError.hidden = false;
     } finally {
-      btn.disabled = false;
+      btnReset(btn);
     }
   });
 
@@ -795,6 +806,8 @@
     e.preventDefault();
     const status = $('#dr-status');
     status.hidden = true;
+    const btn = e.target.querySelector('button');
+    btnLoading(btn);
 
     try {
       const res = await api('/settings/darkreel', {
@@ -826,12 +839,16 @@
       status.textContent = 'Connection failed';
       status.className = 'settings-status error';
       status.hidden = false;
+    } finally {
+      btnReset(btn);
     }
   });
 
   // Remove Darkreel creds
   $('#dr-remove-btn').addEventListener('click', async () => {
     const status = $('#dr-status');
+    const btn = $('#dr-remove-btn');
+    btnLoading(btn);
     try {
       const res = await api('/settings/darkreel', { method: 'DELETE' });
       if (res.ok) {
@@ -845,6 +862,8 @@
       status.textContent = 'Failed to remove';
       status.className = 'settings-status error';
       status.hidden = false;
+    } finally {
+      btnReset(btn);
     }
   });
 
@@ -864,7 +883,7 @@
     }
 
     const btn = e.target.querySelector('button');
-    btn.disabled = true;
+    btnLoading(btn);
 
     try {
       const res = await api('/auth/change-password', {
@@ -898,7 +917,7 @@
       status.className = 'settings-status error';
       status.hidden = false;
     } finally {
-      btn.disabled = false;
+      btnReset(btn);
     }
   });
 
@@ -909,6 +928,9 @@
     status.hidden = true;
 
     if (!confirm('Are you sure you want to delete your account? This cannot be undone.')) return;
+
+    const btn = e.target.querySelector('button');
+    btnLoading(btn);
 
     try {
       const res = await api('/auth/account', {
@@ -930,6 +952,8 @@
       status.textContent = 'Connection failed';
       status.className = 'settings-status error';
       status.hidden = false;
+    } finally {
+      btnReset(btn);
     }
   });
 
@@ -982,9 +1006,14 @@
       list.querySelectorAll('[data-delete-user]').forEach((btn) => {
         btn.addEventListener('click', async () => {
           if (!confirm('Delete this user?')) return;
+          btnLoading(btn);
           const userId = btn.dataset.deleteUser;
-          const res = await api(`/admin/users/${userId}`, { method: 'DELETE' });
-          if (res.ok) { await loadUsers(); if (vpnAvailable) await loadVpnPermissions(); }
+          try {
+            const res = await api(`/admin/users/${userId}`, { method: 'DELETE' });
+            if (res.ok) { await loadUsers(); if (vpnAvailable) await loadVpnPermissions(); }
+          } finally {
+            btnReset(btn);
+          }
         });
       });
     } catch {}
@@ -1003,7 +1032,9 @@
 
   $('#registration-save-btn').addEventListener('click', async () => {
     const status = $('#registration-status');
+    const btn = $('#registration-save-btn');
     const enabled = $('#registration-select').value === 'true';
+    btnLoading(btn);
     try {
       const res = await api('/admin/registration', {
         method: 'POST',
@@ -1025,6 +1056,8 @@
       status.textContent = 'Connection failed';
       status.className = 'settings-status error';
       status.hidden = false;
+    } finally {
+      btnReset(btn);
     }
   });
 
@@ -1035,7 +1068,7 @@
     status.hidden = true;
 
     const btn = e.target.querySelector('button');
-    btn.disabled = true;
+    btnLoading(btn);
 
     try {
       const res = await api('/admin/users', {
@@ -1072,7 +1105,7 @@
       status.className = 'settings-status error';
       status.hidden = false;
     } finally {
-      btn.disabled = false;
+      btnReset(btn);
     }
   });
 
@@ -1131,7 +1164,9 @@
 
   $('#vpn-default-save-btn').addEventListener('click', async () => {
     const status = $('#vpn-default-status');
+    const btn = $('#vpn-default-save-btn');
     const value = $('#vpn-default-select').value;
+    btnLoading(btn);
     try {
       const res = await api('/admin/vpn/default', {
         method: 'PUT',
@@ -1151,6 +1186,8 @@
       status.textContent = 'Connection failed';
       status.className = 'settings-status error';
       status.hidden = false;
+    } finally {
+      btnReset(btn);
     }
   });
 
@@ -1197,8 +1234,7 @@
     const location = select.value;
     if (!location) return;
 
-    btn.disabled = true;
-    btn.textContent = 'Switching...';
+    btnLoading(btn);
     status.hidden = true;
 
     try {
@@ -1223,8 +1259,7 @@
       status.className = 'settings-status error';
       status.hidden = false;
     } finally {
-      btn.disabled = false;
-      btn.textContent = 'Switch';
+      btnReset(btn);
     }
   });
 })();

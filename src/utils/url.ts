@@ -15,14 +15,21 @@ export async function isPrivateUrl(url: string): Promise<boolean> {
     // Block obviously private hostnames
     if (isPrivateHostname(hostname)) return true;
 
-    // Resolve DNS and check the resulting IP
+    // Resolve DNS and check the resulting IP (retry once on transient failure)
     let firstAddress: string;
     try {
       const result = await lookup(hostname);
       firstAddress = result.address;
     } catch {
-      // DNS resolution failed — reject (fail closed)
-      return true;
+      // Retry once — transient DNS failures are common with CDNs
+      try {
+        await delay(250);
+        const result = await lookup(hostname);
+        firstAddress = result.address;
+      } catch {
+        // DNS resolution failed twice — reject (fail closed)
+        return true;
+      }
     }
 
     if (isPrivateIP(firstAddress)) return true;
@@ -36,7 +43,7 @@ export async function isPrivateUrl(url: string): Promise<boolean> {
       const result2 = await lookup(hostname);
       if (isPrivateIP(result2.address)) return true;
     } catch {
-      return true;
+      // Second lookup failed but first already resolved to a public IP — allow
     }
 
     return false;
