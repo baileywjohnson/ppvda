@@ -2,6 +2,13 @@ node_modules/
 dist/
 downloads/
 tmp/
+data/
 .env
+bootstrap.env
+docker-compose.override.yml
+backup.key
+backups/
+darkreel-cli-linux
 *.tgz
+.DS_Store
 /mullvad/

@@ -1,0 +1,34 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_DEPLOY_KEY: ${{ secrets.VPS_DEPLOY_KEY }}
+          VPS_HOST_KEY: ${{ secrets.VPS_HOST_KEY }}
+        run: |
+          # Set up SSH
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_HOST_KEY" > ~/.ssh/known_hosts
+          printf '%s\n' "$VPS_DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # Deploy: pull latest code and rebuild container
+          ssh -i ~/.ssh/deploy_key "deploy@${VPS_HOST}" \
+            'sudo /usr/local/bin/ppvda-deploy'
+
+          # Health check
+          sleep 10
+          ssh -i ~/.ssh/deploy_key "deploy@${VPS_HOST}" \
+            'curl -sf http://localhost:3000/health || echo "WARNING: health check failed"'
+
+          # Clean up
+          rm -f ~/.ssh/deploy_key
