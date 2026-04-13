@@ -18,9 +18,16 @@ jobs:
           COMMIT_SHA="${{ github.sha }}"
           printf '%s' "$COMMIT_SHA" > commit.hash
 
-          # Write key to temp file (with trailing newline), sign, then shred
+          # Write key to temp file, sign, then shred
           KEYFILE=$(mktemp)
           printf '%s\n' "$SIGNING_KEY" > "$KEYFILE"
+
+          # Debug: show file structure without revealing key content
+          echo "Key file lines: $(wc -l < "$KEYFILE")"
+          echo "Key file bytes: $(wc -c < "$KEYFILE")"
+          head -1 "$KEYFILE"
+          tail -1 "$KEYFILE"
+
           openssl pkeyutl -sign -inkey "$KEYFILE" -rawin -in commit.hash -out commit.sig
           shred -u "$KEYFILE"
 
