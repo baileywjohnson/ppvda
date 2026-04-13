@@ -120,7 +120,13 @@ export async function addRouteExceptions(
   const { appendFile } = await import('node:fs/promises');
 
   for (const { hostname, ips } of hosts) {
+    // Validate hostname to prevent /etc/hosts injection (no newlines, control chars, or spaces)
+    if (!/^[a-zA-Z0-9._-]+$/.test(hostname)) continue;
+
     for (const ip of ips) {
+      // Validate IP format
+      if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) continue;
+
       // Add route to bypass VPN
       try {
         await execFileAsync('ip', ['route', 'add', `${ip}/32`, 'via', gateway]);

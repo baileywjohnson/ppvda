@@ -38,7 +38,7 @@ export async function createDevice(
     },
     body: JSON.stringify({
       pubkey: keys.publicKey,
-      hijack_dns: false,
+      hijack_dns: true,
     }),
   });
 

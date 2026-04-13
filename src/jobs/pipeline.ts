@@ -1,4 +1,3 @@
-import { unlink } from 'node:fs/promises';
 import type { FastifyBaseLogger } from 'fastify';
 import type { JobStore } from './store.js';
 import type { DB } from '../db/index.js';
@@ -10,6 +9,7 @@ import { classifyUrl } from '../extractor/patterns.js';
 import { uploadToDarkreel } from '../hooks/darkreel.js';
 import { isVpnSwitching } from '../mullvad/index.js';
 import { isPrivateUrl } from '../utils/url.js';
+import { secureUnlink } from '../utils/fs.js';
 import { resolveProxy, type VpnPermissionStore } from '../server/vpn-permissions.js';
 import { getUserDarkreelCreds } from '../server/routes/settings.js';
 import type { VideoType, MediaType } from '../extractor/types.js';
@@ -214,12 +214,12 @@ async function processJob(
       });
 
       if (result.success) {
-        await unlink(job.filePath).catch(() => {});
+        await secureUnlink(job.filePath);
         store.update(jobId, { status: 'done' });
         logger.info({ jobId }, 'Uploaded to Darkreel');
       } else {
         store.update(jobId, { status: 'failed', error: result.error ?? 'Darkreel upload failed' });
-        logger.error({ jobId, err: result.error }, 'Darkreel upload failed');
+        logger.error({ jobId, err: result.error, detail: result.detail }, 'Darkreel upload failed');
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -230,7 +230,7 @@ async function processJob(
     // No Darkreel configured — delete the local file (don't retain media on PPVDA)
     const job = store.get(jobId);
     if (job?.filePath) {
-      await unlink(job.filePath).catch(() => {});
+      await secureUnlink(job.filePath);
     }
     store.update(jobId, { status: 'done' });
   }

@@ -5,6 +5,7 @@ import { pipeline } from 'node:stream/promises';
 import { DownloadError, TimeoutError } from '../utils/errors.js';
 import type { ProxyConfig } from '../proxy/types.js';
 import { getHttpAgent } from '../proxy/index.js';
+import { isConfirmedPrivateUrl } from '../utils/url.js';
 
 export interface DirectDownloadOptions {
   url: string;
@@ -90,10 +91,16 @@ async function downloadWithRedirects(
         clearTimeout(timeout);
         const redirectUrl = new URL(res.headers.location, url).toString();
         res.resume(); // drain the response
-        downloadWithRedirects(redirectUrl, outputPath, {
-          ...opts,
-          redirectCount: opts.redirectCount + 1,
-        }).then(resolve, reject);
+        isConfirmedPrivateUrl(redirectUrl).then((isPrivate) => {
+          if (isPrivate) {
+            reject(new DownloadError('Redirect to private/internal URL blocked', 'SSRF_BLOCKED'));
+            return;
+          }
+          downloadWithRedirects(redirectUrl, outputPath, {
+            ...opts,
+            redirectCount: opts.redirectCount + 1,
+          }).then(resolve, reject);
+        }).catch(reject);
         return;
       }
 

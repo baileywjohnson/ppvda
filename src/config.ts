@@ -11,6 +11,12 @@ function getJwtSecret(): string {
     }
     return secret;
   }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'JWT_SECRET is required in production. Generate one with:\n' +
+      '  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"',
+    );
+  }
   // Generate a strong ephemeral secret — warn that sessions won't survive restarts
   console.warn(
     'WARNING: JWT_SECRET not set — using random secret. Sessions will not survive server restarts.\n' +

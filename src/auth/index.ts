@@ -125,9 +125,15 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
   };
 
   // --- Admin-only preHandler ---
+  // Re-verify admin status from DB on every request (JWT claim alone is not trusted)
   const requireAdmin = async (request: FastifyRequest, reply: FastifyReply) => {
     const user = (request as any).user;
-    if (!user?.isAdmin) {
+    if (!user?.sub) {
+      reply.status(403).send({ success: false, error: 'Admin access required' });
+      return reply;
+    }
+    const dbUser = db.getUserById(user.sub);
+    if (!dbUser || !dbUser.is_admin) {
       reply.status(403).send({ success: false, error: 'Admin access required' });
       return reply;
     }

@@ -24,6 +24,8 @@ export interface DarkreelCredsRow {
   updated_at: string;
 }
 
+const WAL_CHECKPOINT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
 export class DB {
   private db: Database.Database;
 
@@ -33,7 +35,17 @@ export class DB {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.migrate();
+
+    // Checkpoint WAL periodically to prevent transaction history accumulation.
+    // wal_checkpoint(TRUNCATE) forces all WAL pages back into the main DB and
+    // truncates the WAL file to zero bytes, eliminating forensic recovery of
+    // past transactions.
+    this.walTimer = setInterval(() => {
+      try { this.db.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* non-fatal */ }
+    }, WAL_CHECKPOINT_INTERVAL_MS);
   }
+
+  private walTimer: ReturnType<typeof setInterval>;
 
   private migrate() {
     this.db.exec(`
@@ -46,7 +58,7 @@ export class DB {
         master_key_nonce BLOB NOT NULL,
         kdf_iterations INTEGER NOT NULL DEFAULT 100000,
         is_admin INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%W', 'now'))
       );
     `);
 
@@ -76,7 +88,7 @@ export class DB {
         user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
         encrypted_data BLOB NOT NULL,
         nonce BLOB NOT NULL,
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%W', 'now'))
       );
     `);
 
@@ -89,6 +101,9 @@ export class DB {
   }
 
   close() {
+    clearInterval(this.walTimer);
+    // Final checkpoint before closing to leave no WAL residue
+    try { this.db.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* closing anyway */ }
     this.db.close();
   }
 
@@ -170,8 +185,8 @@ export class DB {
   saveDarkreelCreds(userId: string, encryptedData: Buffer, nonce: Buffer) {
     this.db.prepare(`
       INSERT INTO darkreel_creds (user_id, encrypted_data, nonce, updated_at)
-      VALUES (?, ?, ?, datetime('now'))
-      ON CONFLICT(user_id) DO UPDATE SET encrypted_data = excluded.encrypted_data, nonce = excluded.nonce, updated_at = datetime('now')
+      VALUES (?, ?, ?, strftime('%Y-%W', 'now'))
+      ON CONFLICT(user_id) DO UPDATE SET encrypted_data = excluded.encrypted_data, nonce = excluded.nonce, updated_at = strftime('%Y-%W', 'now')
     `).run(userId, encryptedData, nonce);
   }
 

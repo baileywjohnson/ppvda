@@ -1,3 +1,5 @@
+import { writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { loadConfig } from './config.js';
 import { buildApp } from './server/index.js';
 import { closeBrowser } from './extractor/index.js';
@@ -25,11 +27,12 @@ async function main() {
       throw new Error('PPVDA_ADMIN_PASSWORD must be 16+ characters with at least one letter, one number, and one symbol (no spaces)');
     }
     const recoveryCode = await bootstrapAdmin(db, config.adminUsername, config.adminPassword);
-    logger.info({ username: config.adminUsername }, 'Admin user created');
-    logger.info('='.repeat(60));
-    logger.info('SAVE THIS RECOVERY CODE — it will not be shown again:');
-    logger.info(recoveryCode);
-    logger.info('='.repeat(60));
+    logger.info('Admin user created');
+    // Write recovery code to a file readable only by the owner, not to stdout
+    // where container orchestration or log aggregators could capture it.
+    const recoveryPath = join(dirname(config.dbPath), 'admin-recovery-code.txt');
+    await writeFile(recoveryPath, recoveryCode + '\n', { mode: 0o600 });
+    logger.info(`Recovery code written to ${recoveryPath} — read it, save it, then delete the file`);
   }
 
   // Initialize session store with background cleanup

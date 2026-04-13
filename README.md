@@ -169,7 +169,7 @@ sudo ./setup.sh
 | Data | Retained? | Notes |
 |------|-----------|-------|
 | Video URLs | No | Only in browser memory during extraction |
-| Downloaded files | No | Auto-deleted after job completion |
+| Downloaded files | No | Securely overwritten and deleted after job completion |
 | Download history | No | Job metadata cleared from memory when jobs finish |
 | Darkreel credentials | Encrypted at rest | AES-256-GCM, per-user master key with AAD binding |
 | Usernames | Yes (plaintext) | Use non-identifying usernames |
@@ -181,18 +181,24 @@ sudo ./setup.sh
 - **TLS required** -- PPVDA does not handle TLS. Deploy behind a reverse proxy or access over a secure tunnel only.
 - **Argon2id password hashing** -- Memory-hard hashing with parameters matching Darkreel (t=3, m=64MB, p=4, keyLen=32). Dual salts: separate auth salt for password hash and KDF salt for master key encryption.
 - **Authenticated encryption** -- All master key encryption uses AES-256-GCM with Additional Authenticated Data (AAD) binding encrypted keys to their owner's user ID, preventing ciphertext substitution between users.
-- **Recovery codes** -- 32-byte random codes generated on registration and rotated on every password change. Master key is independently encrypted with the recovery code. Recovery codes are shown once and never stored in plaintext.
+- **Recovery codes** -- 32-byte random codes generated on registration and rotated on every password change. Master key is independently encrypted with the recovery code. Recovery codes are written to a file (mode 0600) on first run -- never printed to stdout where container orchestration could capture them.
 - **Timing-safe authentication** -- Dummy Argon2id derivation performed for non-existent usernames, preventing timing-based username enumeration.
 - **Per-username rate limiting** -- 10 login/recovery attempts per username per 15 minutes, defending against distributed brute-force even when per-IP limits are bypassed.
 - **Session isolation** -- Sessions indexed by random session ID (not user ID), with session ID embedded in JWT. Password changes and recovery invalidate all existing sessions.
-- **SSRF protection** -- All user-provided URLs are validated against private IP ranges, IPv6 loopback/link-local/unique-local, and IPv4-mapped IPv6 addresses. DNS resolution is checked twice to detect rebinding attacks. DNS failures are rejected (fail-closed).
+- **SSRF protection** -- All user-provided URLs are validated against private IP ranges, IPv6 loopback/link-local/unique-local, and IPv4-mapped IPv6 addresses. DNS resolution is checked twice to detect rebinding attacks. DNS failures are rejected (fail-closed). HTTP redirect targets are re-validated before following. Darkreel server URLs are validated before connection tests.
 - **No shell injection** -- All subprocesses (ffmpeg, darkreel-cli) are spawned with argument arrays, never through a shell. Credentials are passed via environment variables.
+- **Admin re-verification** -- Admin status is verified from the database on every privileged request. Revoking admin access takes effect immediately, not after JWT expiry.
 - **Rate limiting** -- 100 requests/min globally, 5/min on login/register/recover endpoints.
 - **Concurrency limits** -- Max 3 concurrent Playwright extractions and 3 concurrent downloads (configurable).
 - **Cookie security** -- httpOnly, SameSite=strict, Secure in production. No tokens in localStorage or query parameters.
 - **Minimal subprocess environment** -- ffmpeg and darkreel-cli receive only PATH, HOME, and TMPDIR. Secrets like JWT_SECRET and MULLVAD_ACCOUNT are not leaked.
 - **Security headers** -- CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy on all responses.
-- **No request logging** -- URLs never appear in server logs.
+- **VPN bypass validation** -- Hostnames and IPs in `VPN_BYPASS_HOSTS` are validated before writing to system routes and `/etc/hosts`, preventing injection of arbitrary entries.
+- **No request logging** -- URLs never appear in server logs. No persistent audit logs -- rate limiting and session state are in-memory only and cleared on restart.
+- **Coarsened timestamps** -- Database timestamps use year-week precision (`strftime('%Y-%W')`) matching Darkreel's approach, preventing precise activity correlation. In-memory job timestamps are rounded to the minute.
+- **Secure file deletion** -- Downloaded media files are overwritten with random data and fsynced before unlinking, preventing forensic recovery of content from disk.
+- **WAL hygiene** -- SQLite WAL files are checkpointed and truncated every 5 minutes and on shutdown, preventing forensic recovery of past database transactions.
+- **DNS privacy** -- When Mullvad VPN is active, DNS queries are routed through the WireGuard tunnel (`hijack_dns: true`), preventing ISP-visible DNS leaks for extracted video domains.
 - **Memory security** -- Master keys, derived keys, and passwords are zeroed from memory immediately after use. Session cleanup runs every 60 seconds to evict expired sessions.
 
 ### Credential encryption model
@@ -220,7 +226,7 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
 
 - Fresh WireGuard keys generated on every startup -- no persistent cryptographic material on disk
 - Device deregistered from Mullvad on clean shutdown
-- All extraction and download traffic routes through the tunnel
+- All extraction and download traffic routes through the tunnel, including DNS
 - Darkreel uploads can bypass the VPN via `VPN_BYPASS_HOSTS` (direct connection for speed)
 
 ### Password requirements
@@ -233,7 +239,7 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
 
 ### Admin bootstrap
 
-On first startup, if the database is empty, PPVDA creates an admin user from `PPVDA_ADMIN_USERNAME` and `PPVDA_ADMIN_PASSWORD`. A recovery code is logged to the console -- save it immediately. After this, the env vars are not used for authentication -- the database is authoritative.
+On first startup, if the database is empty, PPVDA creates an admin user from `PPVDA_ADMIN_USERNAME` and `PPVDA_ADMIN_PASSWORD`. The recovery code is written to `<DB_PATH_DIR>/admin-recovery-code.txt` (mode 0600) -- read it, save it, then delete the file. After this, the env vars are not used for authentication -- the database is authoritative.
 
 ### Self-registration
 
@@ -289,7 +295,7 @@ All configuration is via environment variables (or `.env` file).
 |----------|---------|-------------|
 | `PPVDA_ADMIN_USERNAME` | `admin` | Admin username (first-run only) |
 | `PPVDA_ADMIN_PASSWORD` | **(required)** | Admin password (first-run only) |
-| `JWT_SECRET` | random | JWT signing secret. Set this for persistent sessions across restarts. |
+| `JWT_SECRET` | random (dev), **required** (prod) | JWT signing secret. Required when `NODE_ENV=production`. Set to a random 32+ character string for persistent sessions across restarts. |
 | `DB_PATH` | `./data/ppvda.db` | SQLite database path |
 
 ### Darkreel CLI

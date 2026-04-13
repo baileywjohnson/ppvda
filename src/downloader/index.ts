@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { generateId } from '../utils/id.js';
-import { ensureDir, tempPath, moveFile, fileSize } from '../utils/fs.js';
+import { ensureDir, tempPath, moveFile, fileSize, secureUnlink } from '../utils/fs.js';
 import { DownloadError } from '../utils/errors.js';
 import { downloadDirect } from './direct.js';
 import { downloadHls } from './hls.js';
@@ -95,9 +95,8 @@ export async function downloadVideo(options: FullDownloadOptions): Promise<Downl
       success: true,
     };
   } catch (err) {
-    // Clean up temp file on failure (best effort)
-    const { unlink } = await import('node:fs/promises');
-    await unlink(tmpPath).catch(() => {});
+    // Securely clean up temp file on failure
+    await secureUnlink(tmpPath);
     throw err;
   }
 }

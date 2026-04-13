@@ -4,6 +4,13 @@ import { generateId } from '../utils/id.js';
 const JOB_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const SWEEP_INTERVAL_MS = 60 * 1000; // check every minute
 
+/** Coarsen timestamps to the current minute to reduce correlation precision. */
+function coarseNow(): string {
+  const d = new Date();
+  d.setSeconds(0, 0);
+  return d.toISOString();
+}
+
 export class JobStore {
   private jobs = new Map<string, Job>();
   private listeners = new Set<(event: JobEvent) => void>();
@@ -32,7 +39,7 @@ export class JobStore {
   }
 
   create(userId: string): Job {
-    const now = new Date().toISOString();
+    const now = coarseNow();
     const job: Job = {
       id: generateId(),
       userId,
@@ -62,7 +69,7 @@ export class JobStore {
   update(id: string, patch: Partial<Job>): Job | undefined {
     const job = this.jobs.get(id);
     if (!job) return undefined;
-    Object.assign(job, patch, { updatedAt: new Date().toISOString() });
+    Object.assign(job, patch, { updatedAt: coarseNow() });
     // Clear sensitive metadata from terminal jobs to minimize retained info
     if (job.status === 'done' || job.status === 'failed') {
       job.filePath = undefined;

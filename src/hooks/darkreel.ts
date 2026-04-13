@@ -12,6 +12,7 @@ export interface DrkUploadOptions {
 export interface DrkUploadResult {
   success: boolean;
   error?: string;
+  detail?: string;
 }
 
 /**
@@ -22,8 +23,14 @@ export interface DrkUploadResult {
 export async function uploadToDarkreel(opts: DrkUploadOptions): Promise<DrkUploadResult> {
   const { drkBinaryPath, serverUrl, username, password, filePath, timeoutMs } = opts;
 
-  // Only pass the file path as a CLI arg — credentials go through env vars
-  const args = ['upload', filePath];
+  // Only pass the file path as a CLI arg — credentials go through env vars.
+  // Allow plaintext HTTP if the server URL isn't HTTPS (e.g., Docker internal
+  // networking or reverse-proxy setups where TLS terminates upstream).
+  const args = ['upload'];
+  if (!serverUrl.startsWith('https://')) {
+    args.push('-insecure');
+  }
+  args.push(filePath);
 
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? '',
@@ -67,7 +74,9 @@ export async function uploadToDarkreel(opts: DrkUploadOptions): Promise<DrkUploa
         } else if (combined.includes('connect') || combined.includes('no such host') || combined.includes('connection refused')) {
           resolve({ success: false, error: 'Could not connect to Darkreel server — check the server URL in Settings' });
         } else {
-          resolve({ success: false, error: `Upload failed (exit code ${code})` });
+          // Log the CLI's stderr for debugging — it only contains high-level
+          // status ("FAILED", "Done: N uploaded, M failed"), not sensitive data.
+          resolve({ success: false, error: `Upload failed (exit code ${code})`, detail: stderr.trim() || undefined });
         }
       }
     });

@@ -1,12 +1,12 @@
 import { createReadStream } from 'node:fs';
-import { stat, unlink, writeFile } from 'node:fs/promises';
+import { stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { pipeline } from 'node:stream/promises';
 import { runFfmpeg } from '../../downloader/ffmpeg.js';
 import { streamDownloadRequestSchema } from '../schemas/stream-download.js';
 import { generateId } from '../../utils/id.js';
-import { ensureDir } from '../../utils/fs.js';
+import { ensureDir, secureUnlink } from '../../utils/fs.js';
 import type { ProxyConfig } from '../../proxy/types.js';
 import { isPrivateUrl } from '../../utils/url.js';
 import { isVpnSwitching } from '../../mullvad/index.js';
@@ -198,10 +198,10 @@ async function handleVideoDownload(
       // Connection dropped mid-stream
     } finally {
       reply.raw.end();
-      await unlink(tempPath).catch(() => {});
+      await secureUnlink(tempPath);
     }
   } catch {
-    await unlink(tempPath).catch(() => {});
+    await secureUnlink(tempPath);
     reply.status(502).send({ success: false, error: 'Failed to download video' });
   }
 }

@@ -79,3 +79,29 @@ function isPrivateIP(ip: string): boolean {
 
   return false;
 }
+
+/**
+ * Like isPrivateUrl but fail-open: only blocks when the resolved IP is
+ * *confirmed* private. DNS resolution failures are allowed through because
+ * the HTTP client will fail on its own. This is appropriate for redirect
+ * targets where the initial URL was already validated at the route level.
+ */
+export async function isConfirmedPrivateUrl(url: string): Promise<boolean> {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname;
+
+    if (isPrivateHostname(hostname)) return true;
+
+    try {
+      const result = await lookup(hostname);
+      if (isPrivateIP(result.address)) return true;
+    } catch {
+      return false; // DNS failed — let the HTTP client handle it
+    }
+
+    return false;
+  } catch {
+    return false; // Malformed URL — let the caller handle it
+  }
+}
