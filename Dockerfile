@@ -36,10 +36,11 @@ RUN npm run build
 FROM base AS runtime
 WORKDIR /app
 
-# Copy darkreel-cli binary (pre-built for Linux)
-# To use GitHub releases instead, replace this COPY with the curl download block
-COPY darkreel-cli-linux /usr/local/bin/darkreel-cli
-RUN chmod +x /usr/local/bin/darkreel-cli
+# Download latest darkreel-cli from GitHub releases
+ARG TARGETARCH
+RUN curl -fsSL -o /usr/local/bin/darkreel-cli \
+    "https://github.com/baileywjohnson/darkreel-cli/releases/latest/download/darkreel-cli-linux-${TARGETARCH}" \
+    && chmod +x /usr/local/bin/darkreel-cli
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

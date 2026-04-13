@@ -307,15 +307,8 @@ else
 fi
 cd "$REPO_DIR"
 
-# --- Download darkreel-cli ---
-if [ ! -f "darkreel-cli-linux" ]; then
-  info "Downloading darkreel-cli..."
-  ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-  curl -fsSL -o darkreel-cli-linux \
-    "https://github.com/baileywjohnson/darkreel-cli/releases/latest/download/darkreel-cli-linux-${ARCH}"
-  chmod +x darkreel-cli-linux
-  info "darkreel-cli downloaded"
-fi
+# darkreel-cli is downloaded automatically during Docker build
+# from GitHub releases (latest version)
 
 # --- Create directories ---
 mkdir -p data downloads mullvad
