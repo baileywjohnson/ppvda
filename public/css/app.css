@@ -820,7 +820,7 @@ header h1 {
 
   .btn-download, .btn-upload, .btn-downloading {
     flex: 1;
-    min-width: 0;
+    min-width: fit-content;
   }
 
   .settings-group {
