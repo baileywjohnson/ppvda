@@ -106,11 +106,23 @@ async function processJob(
     return;
   }
 
-  // SSRF validation
+  // Protocol and SSRF validation
   const urlToCheck = input.videoUrl ?? input.url;
-  if (urlToCheck && await isPrivateUrl(urlToCheck)) {
-    store.update(jobId, { status: 'failed', error: 'Private/internal URLs are not allowed' });
-    return;
+  if (urlToCheck) {
+    try {
+      const protocol = new URL(urlToCheck).protocol;
+      if (protocol !== 'http:' && protocol !== 'https:') {
+        store.update(jobId, { status: 'failed', error: 'Only http/https URLs are supported' });
+        return;
+      }
+    } catch {
+      store.update(jobId, { status: 'failed', error: 'Invalid URL' });
+      return;
+    }
+    if (await isPrivateUrl(urlToCheck)) {
+      store.update(jobId, { status: 'failed', error: 'Private/internal URLs are not allowed' });
+      return;
+    }
   }
 
   let targetUrl: string;

@@ -156,12 +156,26 @@ async function handleVideoThumbnail(
     ],
   });
 
+  const MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024; // 5 MB — a single JPEG frame is ~50-200 KB
   const chunks: Buffer[] = [];
-  stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+  let totalBytes = 0;
+  let aborted = false;
+
+  stdout.on('data', (chunk: Buffer) => {
+    totalBytes += chunk.length;
+    if (totalBytes > MAX_THUMBNAIL_BYTES) {
+      if (!aborted) {
+        aborted = true;
+        kill();
+      }
+      return;
+    }
+    chunks.push(chunk);
+  });
 
   const result = await new Promise<Buffer | null>((resolve) => {
     proc.on('close', (code) => {
-      if (code === 0 && chunks.length > 0) {
+      if (!aborted && code === 0 && chunks.length > 0) {
         resolve(Buffer.concat(chunks));
       } else {
         resolve(null);

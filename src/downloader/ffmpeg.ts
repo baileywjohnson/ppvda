@@ -124,16 +124,26 @@ export function spawnFfmpegStream(options: FfmpegStreamOptions): {
 } {
   const { inputUrl, ffmpegPath, proxyConfig, timeoutMs = 300000 } = options;
 
-  const args = options.args ?? [
-    '-y',
-    '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
-    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    '-i', inputUrl,
-    '-c', 'copy',
-    '-movflags', 'frag_keyframe+empty_moov',
-    '-f', 'mp4',
-    'pipe:1',
-  ];
+  // Block non-HTTP protocols to prevent file://, gopher://, concat: etc.
+  const protocol = (() => { try { return new URL(inputUrl).protocol; } catch { return ''; } })();
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    throw new FfmpegError('Only http/https URLs are supported by ffmpeg', 'INVALID_PROTOCOL');
+  }
+
+  // Always include protocol whitelist, even with custom args
+  const baseArgs = ['-protocol_whitelist', 'file,http,https,tcp,tls,crypto'];
+  const args = options.args
+    ? [...baseArgs, ...options.args]
+    : [
+      '-y',
+      ...baseArgs,
+      '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      '-i', inputUrl,
+      '-c', 'copy',
+      '-movflags', 'frag_keyframe+empty_moov',
+      '-f', 'mp4',
+      'pipe:1',
+    ];
 
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? '',

@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Playwright Chromium
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN npx -y playwright@1.58.2 install --with-deps chromium
+RUN npx -y playwright@1.59.1 install --with-deps chromium
 
 WORKDIR /app
 

@@ -52,12 +52,16 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
       const { server, username, password } = request.body;
 
       // Block SSRF — prevent testing against private/internal addresses.
-      // Allow Docker internal hostnames (host.docker.internal, gateway.docker.internal,
-      // host.containers.internal) since Darkreel often runs on the Docker host.
+      // Docker internal hostnames (host.docker.internal etc.) are only allowed for admins
+      // since they enable reaching services on the Docker host.
       const serverHostname = (() => { try { return new URL(server).hostname.toLowerCase(); } catch { return ''; } })();
       const isDockerInternal = serverHostname === 'host.docker.internal'
         || serverHostname === 'gateway.docker.internal'
         || serverHostname === 'host.containers.internal';
+      if (isDockerInternal && !(request as any).user.isAdmin) {
+        reply.status(403).send({ success: false, error: 'Docker-internal server URLs require admin privileges' });
+        return;
+      }
       if (!isDockerInternal && await isPrivateUrl(server)) {
         reply.status(400).send({ success: false, error: 'Private/internal server URLs are not allowed' });
         return;
