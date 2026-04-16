@@ -8,7 +8,23 @@ bootstrap.env
 docker-compose.override.yml
 backup.key
 backups/
+darkreel-cli
 darkreel-cli-linux
 *.tgz
 .DS_Store
 /mullvad/
+
+# Database files
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Secrets & keys
+*.key
+*.pem
+*.p12
+*.pfx
+*.cert
+*.crt
