@@ -1,9 +1,9 @@
-import { writeFile, unlink } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import dns from 'node:dns/promises';
-import { ensureDir } from '../utils/fs.js';
+import { ensureDir, secureUnlink } from '../utils/fs.js';
 import type { DeviceInfo, RelayServer } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -87,7 +87,9 @@ export async function stopTunnel(configDir: string): Promise<void> {
     // Non-fatal
   }
 
-  await unlink(configPath).catch(() => {});
+  // Securely overwrite the config file before unlinking — it contains the
+  // WireGuard private key. secureUnlink writes random bytes + fsyncs before unlink.
+  await secureUnlink(configPath).catch(() => {});
 }
 
 /**

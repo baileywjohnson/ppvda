@@ -303,6 +303,10 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
       if (isLegacy) {
         // Legacy scrypt verification
         if (!verifyPasswordLegacy(password, user.password_hash)) {
+          // Dummy Argon2id derivation to equalize timing with Argon2id users
+          // (otherwise attackers could distinguish legacy vs migrated accounts by timing).
+          const dummySalt = generateSalt();
+          await deriveKey(password, dummySalt);
           reply.status(401).send({ success: false, error: 'Username and/or password is incorrect.' });
           return;
         }
