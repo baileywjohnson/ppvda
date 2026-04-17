@@ -318,6 +318,8 @@ To set up:
 2. Ensure `darkreel-cli` is available (included in the Docker image, or [install manually](https://github.com/baileywjohnson/darkreel-cli#install))
 3. In PPVDA, go to **Settings** and enter your Darkreel server URL, username, and password
 
+Docker-internal hostnames (`host.docker.internal`, `gateway.docker.internal`, `host.containers.internal`) are allowed only for admin users, since they enable reaching services on the Docker host. Regular users must use a public URL or IP.
+
 ## API
 
 All endpoints except `/health`, `/auth/login`, `/auth/register`, `/auth/recover`, and `/auth/registration` require authentication.
