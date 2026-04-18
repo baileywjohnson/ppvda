@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises';
+import { writeFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { loadConfig } from './config.js';
 import { buildApp } from './server/index.js';
@@ -19,6 +19,7 @@ async function main() {
   logger.info({ dbPath: config.dbPath }, 'Database initialized');
 
   // Bootstrap admin user on first run
+  const recoveryPath = join(dirname(config.dbPath), 'admin-recovery-code.txt');
   if (db.getUserCount() === 0) {
     if (!config.adminPassword) {
       throw new Error('PPVDA_ADMIN_PASSWORD must be set for first-run admin bootstrap');
@@ -30,9 +31,22 @@ async function main() {
     logger.info('Admin user created');
     // Write recovery code to a file readable only by the owner, not to stdout
     // where container orchestration or log aggregators could capture it.
-    const recoveryPath = join(dirname(config.dbPath), 'admin-recovery-code.txt');
     await writeFile(recoveryPath, recoveryCode + '\n', { mode: 0o600 });
     logger.info(`Recovery code written to ${recoveryPath} — read it, save it, then delete the file`);
+  } else {
+    // Warn on every subsequent startup if the recovery code file is still present.
+    // The user was told to delete it; if it's still there, anyone with filesystem
+    // access to the data volume can recover the admin account.
+    try {
+      const st = await stat(recoveryPath);
+      const ageHours = Math.floor((Date.now() - st.mtimeMs) / (60 * 60 * 1000));
+      logger.warn(
+        { path: recoveryPath, ageHours },
+        'SECURITY: admin-recovery-code.txt still exists on disk — read the code, save it elsewhere, then delete the file',
+      );
+    } catch {
+      // File doesn't exist — expected case, no action.
+    }
   }
 
   // Initialize session store with background cleanup

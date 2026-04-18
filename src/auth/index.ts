@@ -238,6 +238,11 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
         return;
       }
       if (db.getUserByUsername(username)) {
+        // Dummy Argon2id derivation so timing matches the successful path
+        // (which runs hashPassword + deriveKey). Without this, an attacker
+        // could enumerate valid usernames via registration response timing.
+        const dummySalt = generateSalt();
+        await deriveKey(password, dummySalt);
         reply.status(400).send({ success: false, error: 'Registration failed.' });
         return;
       }

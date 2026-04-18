@@ -258,7 +258,7 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
 - **Argon2id password hashing** — Memory-hard hashing matching Darkreel (t=3, m=64MB, p=4, keyLen=32). Dual salts: separate auth salt for password hash and KDF salt for master key encryption
 - **Authenticated encryption** — All encryption uses AES-256-GCM with AAD binding ciphertexts to their owner's user ID, preventing ciphertext substitution between users
 - **Recovery codes** — 32-byte random codes generated on registration and rotated on every password change. Master key is independently encrypted with the recovery code
-- **Timing-safe authentication** — Dummy Argon2id derivation performed for non-existent usernames, preventing timing-based username enumeration
+- **Timing-safe authentication** — Dummy Argon2id derivation performed for non-existent usernames, legacy scrypt users whose login fails, and duplicate-username registration attempts, preventing timing-based username enumeration across all entry points
 - **Per-username rate limiting** — 10 login/recovery attempts per username per 15 minutes, defending against distributed brute-force even when per-IP limits are bypassed
 - **Session isolation** — Sessions indexed by random session ID (not user ID), with session ID embedded in JWT. Password changes and recovery invalidate all existing sessions
 - **SSRF protection** — All URLs validated against private IP ranges, IPv6 loopback/link-local/unique-local, and IPv4-mapped IPv6 addresses. DNS resolution checked twice with a 500ms delay to detect rebinding attacks. DNS failures rejected (fail-closed). HTTP redirect targets re-validated. Extracted video URLs re-validated before download
@@ -275,7 +275,7 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
 - **WAL hygiene** — SQLite WAL files checkpointed and truncated every 5 minutes and on shutdown, preventing forensic recovery of past transactions
 - **DNS privacy** — When Mullvad VPN is active, DNS queries route through the WireGuard tunnel
 - **Memory security** — Master keys, derived keys, and passwords zeroed from memory immediately after use. Session cleanup runs every 60 seconds
-- **Bootstrap credential cleanup** — Admin password stored in a separate bootstrap file during setup, shredded after the first health check. Never persists in `.env`
+- **Bootstrap credential cleanup** — Admin password stored in a separate bootstrap file during setup, shredded after the first health check. Never persists in `.env`. If the admin recovery code file (`admin-recovery-code.txt`) is not deleted manually after first run, the server logs a WARN on every startup reminding the operator to remove it
 - **Encrypted database backups** — Daily backups encrypted with AES-256-CBC and a randomly generated key, 30-day retention
 - **Protocol restriction** — ffmpeg and ffprobe inputs restricted to http/https protocols, blocking `file://`, `gopher://`, `concat:`, etc.
 - **Legacy migration** — Users created with older scrypt/PBKDF2 auth are transparently upgraded to Argon2id + AAD on next login
