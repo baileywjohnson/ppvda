@@ -1,7 +1,7 @@
 # --- Node base ---
 FROM node:20-bookworm-slim AS base
 
-# Install ffmpeg, WireGuard tools
+# Install ffmpeg, WireGuard tools, gosu (for privilege dropping)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     wireguard-tools \
@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iptables \
     ca-certificates \
     curl \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Playwright Chromium
@@ -49,15 +50,17 @@ COPY build.sh ./
 RUN bash build.sh && rm build.sh
 COPY package.json ./
 
-# Create non-root user (used when Mullvad/WireGuard is NOT needed)
+# Create non-root user for the app process
 RUN groupadd -r ppvda && useradd -r -g ppvda -m ppvda \
     && mkdir -p /app/downloads /app/tmp /app/mullvad /app/data \
     && chown -R ppvda:ppvda /app
 
-# Note: When using Mullvad/WireGuard, the container must run as root
-# (requires NET_ADMIN capability and /dev/net/tun). Use docker-compose
-# or set --cap-add=NET_ADMIN and --device=/dev/net/tun.
-# When NOT using Mullvad, run with: docker run --user ppvda ...
+# Entrypoint drops to the `ppvda` user when Mullvad/WireGuard is NOT
+# configured. When Mullvad IS configured, the container must run as root
+# (requires NET_ADMIN capability and /dev/net/tun) — start with
+# --cap-add=NET_ADMIN and --device=/dev/net/tun (docker-compose handles this).
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV NODE_ENV=production
 ENV DOWNLOAD_DIR=/app/downloads
@@ -68,4 +71,4 @@ ENV DRK_BINARY_PATH=/usr/local/bin/darkreel-cli
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD curl -f http://localhost:3000/health || exit 1
-CMD ["node", "dist/index.js"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

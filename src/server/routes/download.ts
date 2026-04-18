@@ -28,6 +28,7 @@ export async function downloadRoutes(
     defaultTimeoutMs: number;
     defaultNetworkIdleMs: number;
     downloadTimeoutMs: number;
+    maxDownloadBytes: number;
     preferredHosts: string[];
     blockedHosts: string[];
     allowedHosts: string[];
@@ -122,6 +123,7 @@ export async function downloadRoutes(
         outputDir: opts.downloadDir,
         filename,
         timeoutMs: opts.downloadTimeoutMs,
+        maxBytes: opts.maxDownloadBytes,
         proxy,
         ffmpegPath: opts.ffmpegPath,
       });

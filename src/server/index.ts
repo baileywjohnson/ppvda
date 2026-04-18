@@ -35,7 +35,13 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
 
   const vpnPermissions = new VpnPermissionStore();
 
-  await app.register(cors, { origin: false });
+  // CORS: if PUBLIC_URL is configured, allow only that origin explicitly.
+  // Otherwise keep CORS disabled (origin: false) — same-origin policy in the
+  // browser prevents cross-origin Bearer-authenticated requests, so the default
+  // is already secure; PUBLIC_URL just makes the allowed origin explicit.
+  await app.register(cors, {
+    origin: config.publicUrl ? [config.publicUrl] : false,
+  });
 
   // Security headers
   app.addHook('onSend', async (_request, reply) => {
@@ -95,6 +101,7 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
     defaultTimeoutMs: config.browserTimeoutMs,
     defaultNetworkIdleMs: config.networkIdleMs,
     downloadTimeoutMs: config.downloadTimeoutMs,
+    maxDownloadBytes: config.maxDownloadBytes,
     preferredHosts: config.preferredHosts,
     blockedHosts: config.blockedHosts,
     allowedHosts: config.allowedHosts,

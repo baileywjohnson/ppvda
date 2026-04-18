@@ -17,19 +17,52 @@ import {
 // --- Per-username rate limiter (matches Darkreel's AccountLimiter) ---
 
 class AccountLimiter {
+  // Map uses insertion order, which gives us free LRU semantics —
+  // re-inserting an existing key moves it to the end.
   private attempts = new Map<string, { count: number; windowStart: number }>();
   private maxAttempts = 10;
   private windowMs = 15 * 60 * 1000; // 15 minutes
+  private maxEntries = 10000;
+  private cleanupInterval: NodeJS.Timeout | null = null;
+
+  constructor() {
+    // Prune expired entries every minute to bound memory growth.
+    this.cleanupInterval = setInterval(() => this.cleanup(), 60 * 1000);
+    // Don't keep the event loop alive just for the cleanup timer.
+    this.cleanupInterval.unref?.();
+  }
 
   allow(username: string): boolean {
     const now = Date.now();
     const entry = this.attempts.get(username);
     if (!entry || now - entry.windowStart > this.windowMs) {
+      // Evict oldest entry if at capacity (defense against map flooding
+      // with millions of unique usernames).
+      if (this.attempts.size >= this.maxEntries) {
+        const oldest = this.attempts.keys().next().value;
+        if (oldest !== undefined) this.attempts.delete(oldest);
+      }
       this.attempts.set(username, { count: 1, windowStart: now });
       return true;
     }
     entry.count++;
     return entry.count <= this.maxAttempts;
+  }
+
+  private cleanup(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.attempts) {
+      if (now - entry.windowStart > this.windowMs) {
+        this.attempts.delete(key);
+      }
+    }
+  }
+
+  stop(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
   }
 }
 

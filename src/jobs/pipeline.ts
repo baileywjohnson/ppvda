@@ -21,6 +21,7 @@ export interface PipelineOpts {
   defaultTimeoutMs: number;
   defaultNetworkIdleMs: number;
   downloadTimeoutMs: number;
+  maxDownloadBytes: number;
   preferredHosts: string[];
   blockedHosts: string[];
   allowedHosts: string[];
@@ -192,6 +193,7 @@ async function processJob(
       outputDir: opts.downloadDir,
       filename: input.filename,
       timeoutMs: opts.downloadTimeoutMs,
+      maxBytes: opts.maxDownloadBytes,
       proxy,
       ffmpegPath: opts.ffmpegPath,
     });

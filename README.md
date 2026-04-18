@@ -164,7 +164,7 @@ npm run dev
 
 ### VPN setup
 
-The Docker container runs with `privileged: true` and `/dev/net/tun` for WireGuard. When a Mullvad account is configured, PPVDA:
+The Docker container uses `NET_ADMIN` capability and `/dev/net/tun` for WireGuard. When a Mullvad account is configured, PPVDA:
 
 1. Generates fresh WireGuard keys on every startup (nothing persisted to disk)
 2. Registers a device with the Mullvad API
@@ -178,6 +178,10 @@ VPN_BYPASS_HOSTS=media.example.com
 ```
 
 Admins can switch VPN countries and manage per-user VPN permissions from the admin panel without restarting the container.
+
+### Privilege dropping
+
+The Docker entrypoint automatically drops root privileges to an unprivileged `ppvda` user when `MULLVAD_ACCOUNT` is **not** set — root is only needed to bring up the WireGuard tunnel. When Mullvad is configured, the container stays as root (required by the kernel for `NET_ADMIN`). This limits the blast radius of any future Chromium or subprocess sandbox escape when VPN is not in use.
 
 ### Backups
 
@@ -397,6 +401,7 @@ All configuration is via environment variables (or `.env` file).
 |----------|---------|-------------|
 | `PORT` | `3000` | Server port |
 | `HOST` | `0.0.0.0` | Bind address |
+| `PUBLIC_URL` | | External URL users hit (e.g., `https://ppvda.example.com`). When set, it's used as the explicit CORS allowed origin. When unset, CORS is disabled (secure default — browser same-origin policy blocks cross-origin Bearer-authenticated requests). |
 | `DOWNLOAD_DIR` | `./downloads` | Temp directory (files auto-deleted after jobs) |
 | `FFMPEG_PATH` | `ffmpeg` | Path to ffmpeg binary |
 | `MAX_CONCURRENT_DOWNLOADS` | `3` | Max parallel download/upload jobs |
@@ -426,6 +431,7 @@ All configuration is via environment variables (or `.env` file).
 | `BROWSER_TIMEOUT_MS` | `30000` | Page load timeout |
 | `NETWORK_IDLE_MS` | `2000` | Wait for network idle before finishing extraction |
 | `DOWNLOAD_TIMEOUT_MS` | `300000` | Download timeout (5 min) |
+| `MAX_DOWNLOAD_BYTES` | `10737418240` | Max bytes per direct/image download (10 GB). Prevents disk exhaustion from infinite or misconfigured upstream responses. Enforced via `Content-Length` check + streaming byte counter. |
 
 ### Proxy
 

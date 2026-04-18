@@ -27,6 +27,7 @@ export async function downloadVideo(options: FullDownloadOptions): Promise<Downl
     outputDir,
     filename,
     timeoutMs = 300000,
+    maxBytes,
     proxy,
     ffmpegPath = 'ffmpeg',
     tempDir,
@@ -75,6 +76,7 @@ export async function downloadVideo(options: FullDownloadOptions): Promise<Downl
           outputPath: tmpPath,
           proxyConfig: proxy,
           timeoutMs,
+          maxBytes,
         });
         break;
       }

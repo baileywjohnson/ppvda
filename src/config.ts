@@ -29,11 +29,13 @@ function getJwtSecret(): string {
 export interface AppConfig {
   port: number;
   host: string;
+  publicUrl: string | undefined;
   proxyUrl: string | undefined;
   downloadDir: string;
   browserTimeoutMs: number;
   networkIdleMs: number;
   downloadTimeoutMs: number;
+  maxDownloadBytes: number;
   ffmpegPath: string;
   maxConcurrentDownloads: number;
   logLevel: string;
@@ -67,11 +69,15 @@ export function loadConfig(): AppConfig {
   return Object.freeze({
     port: parseInt(process.env.PORT ?? '3000', 10),
     host: process.env.HOST ?? '0.0.0.0',
+    publicUrl: process.env.PUBLIC_URL || undefined,
     proxyUrl: process.env.PROXY_URL || undefined,
     downloadDir: process.env.DOWNLOAD_DIR ?? './downloads',
     browserTimeoutMs: parseInt(process.env.BROWSER_TIMEOUT_MS ?? '30000', 10),
     networkIdleMs: parseInt(process.env.NETWORK_IDLE_MS ?? '2000', 10),
     downloadTimeoutMs: parseInt(process.env.DOWNLOAD_TIMEOUT_MS ?? '300000', 10),
+    // 10 GB default — high enough for long-form video, low enough to prevent
+    // disk exhaustion from an infinite/misconfigured upstream response.
+    maxDownloadBytes: parseInt(process.env.MAX_DOWNLOAD_BYTES ?? String(10 * 1024 * 1024 * 1024), 10),
     ffmpegPath: process.env.FFMPEG_PATH ?? 'ffmpeg',
     maxConcurrentDownloads: parseInt(process.env.MAX_CONCURRENT_DOWNLOADS ?? '3', 10),
     logLevel: process.env.LOG_LEVEL ?? 'info',

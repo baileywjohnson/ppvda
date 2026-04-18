@@ -13,6 +13,7 @@ export interface DirectDownloadOptions {
   proxyConfig?: ProxyConfig;
   timeoutMs?: number;
   maxRedirects?: number;
+  maxBytes?: number;
 }
 
 /**
@@ -25,6 +26,7 @@ export async function downloadDirect(options: DirectDownloadOptions): Promise<vo
     proxyConfig,
     timeoutMs = 300000,
     maxRedirects = 5,
+    maxBytes,
   } = options;
 
   const maxRetries = 3;
@@ -36,6 +38,7 @@ export async function downloadDirect(options: DirectDownloadOptions): Promise<vo
         timeoutMs,
         maxRedirects,
         redirectCount: 0,
+        maxBytes,
       });
       return;
     } catch (err) {
@@ -58,6 +61,7 @@ interface InternalOptions {
   timeoutMs: number;
   maxRedirects: number;
   redirectCount: number;
+  maxBytes?: number;
 }
 
 async function downloadWithRedirects(
@@ -118,7 +122,37 @@ async function downloadWithRedirects(
         return;
       }
 
+      // Reject up-front if Content-Length exceeds the cap.
+      if (opts.maxBytes !== undefined) {
+        const contentLength = parseInt(res.headers['content-length'] ?? '', 10);
+        if (!isNaN(contentLength) && contentLength > opts.maxBytes) {
+          clearTimeout(timeout);
+          req.destroy();
+          reject(new DownloadError(
+            `Response exceeds max size (${contentLength} > ${opts.maxBytes} bytes)`,
+            'SIZE_EXCEEDED',
+          ));
+          return;
+        }
+      }
+
       const fileStream = createWriteStream(outputPath);
+
+      // Track bytes during streaming in case Content-Length was absent,
+      // incorrect, or the server sends an unbounded/chunked response.
+      let bytesReceived = 0;
+      if (opts.maxBytes !== undefined) {
+        const cap = opts.maxBytes;
+        res.on('data', (chunk: Buffer) => {
+          bytesReceived += chunk.length;
+          if (bytesReceived > cap) {
+            req.destroy(new DownloadError(
+              `Response exceeded max size (>${cap} bytes)`,
+              'SIZE_EXCEEDED',
+            ));
+          }
+        });
+      }
 
       pipeline(res, fileStream)
         .then(() => {
@@ -127,6 +161,10 @@ async function downloadWithRedirects(
         })
         .catch((err) => {
           clearTimeout(timeout);
+          if (err instanceof DownloadError) {
+            reject(err);
+            return;
+          }
           reject(new DownloadError(
             `Write failed: ${err.message}`,
             'WRITE_ERROR',

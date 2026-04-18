@@ -15,6 +15,13 @@ interface ExtractBody {
   autoPlay?: boolean;
 }
 
+// Per-user SSE connection cap. A single SSE stream can be held open for the
+// full duration of extraction + background ffprobe calls (potentially minutes).
+// Without a cap, one user could exhaust file descriptors and memory by opening
+// many concurrent streams. Per-user (not global) so one user can't starve others.
+const MAX_SSE_PER_USER = 3;
+const sseConnections = new Map<string, number>();
+
 export async function extractRoutes(
   app: FastifyInstance,
   opts: { proxyConfig?: ProxyConfig; vpnPermissions: VpnPermissionStore; ffmpegPath: string; defaultTimeoutMs: number; defaultNetworkIdleMs: number; preferredHosts: string[]; blockedHosts: string[]; allowedHosts: string[]; preHandler?: preHandlerHookHandler },
@@ -88,6 +95,13 @@ export async function extractRoutes(
       const user = (request as any).user;
       const proxy = resolveProxy(useVpn, user.sub, user.isAdmin, opts.vpnPermissions, opts.proxyConfig);
 
+      // Enforce per-user SSE cap before any other work
+      const currentCount = sseConnections.get(user.sub) ?? 0;
+      if (currentCount >= MAX_SSE_PER_USER) {
+        reply.status(503).send({ success: false, error: 'Too many concurrent extraction streams — close existing ones and retry' });
+        return;
+      }
+
       if (proxy && isVpnSwitching()) {
         reply.status(503).send({ success: false, error: 'VPN is switching countries, try again in a moment' });
         return;
@@ -119,8 +133,19 @@ export async function extractRoutes(
         Connection: 'keep-alive',
       });
 
+      // Register this connection now that we've committed to streaming.
+      sseConnections.set(user.sub, currentCount + 1);
+      let released = false;
+      const releaseSlot = () => {
+        if (released) return;
+        released = true;
+        const count = sseConnections.get(user.sub) ?? 1;
+        if (count <= 1) sseConnections.delete(user.sub);
+        else sseConnections.set(user.sub, count - 1);
+      };
+
       let closed = false;
-      request.raw.on('close', () => { closed = true; });
+      request.raw.on('close', () => { closed = true; releaseSlot(); });
 
       function write(event: string, data: Record<string, unknown>) {
         if (closed) return;
@@ -174,10 +199,12 @@ export async function extractRoutes(
           await Promise.allSettled(probePromises);
           write('done', { pageTitle: result.pageTitle, durationMs: result.durationMs });
           reply.raw.end();
+          releaseSlot();
         },
         onError: (err) => {
           write('error', { error: err.message });
           reply.raw.end();
+          releaseSlot();
         },
       });
     },

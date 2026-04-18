@@ -6,6 +6,7 @@ export interface DownloadOptions {
   outputDir: string;
   filename?: string;
   timeoutMs?: number;
+  maxBytes?: number;
 }
 
 export interface DownloadResult {
