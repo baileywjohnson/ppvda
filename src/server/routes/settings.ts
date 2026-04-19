@@ -51,20 +51,27 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
       const userId = (request as any).user.sub;
       const { server, username, password } = request.body;
 
-      // Block SSRF — prevent testing against private/internal addresses.
-      // Docker internal hostnames (host.docker.internal etc.) are only allowed for admins
-      // since they enable reaching services on the Docker host.
-      const serverHostname = (() => { try { return new URL(server).hostname.toLowerCase(); } catch { return ''; } })();
-      const isDockerInternal = serverHostname === 'host.docker.internal'
-        || serverHostname === 'gateway.docker.internal'
-        || serverHostname === 'host.containers.internal';
-      if (isDockerInternal && !(request as any).user.isAdmin) {
-        reply.status(403).send({ success: false, error: 'Docker-internal server URLs require admin privileges' });
-        return;
-      }
-      if (!isDockerInternal && await isPrivateUrl(server)) {
-        reply.status(400).send({ success: false, error: 'Private/internal server URLs are not allowed' });
-        return;
+      // SSRF defense: block private/internal addresses for non-admins. The
+      // stored URL is used by the job pipeline's connection-test fetch, so
+      // a non-admin who could point it at 127.0.0.1 / 192.168.*.* / a
+      // .internal name would be pivoting PPVDA's network position inside the
+      // deployment. Admins already have network-adjacent capability (shell
+      // access, config edits, etc.), so letting them deliberately target a
+      // same-host or same-LAN Darkreel is a legitimate self-hosted pattern.
+      //
+      // isPrivateUrl catches loopback, RFC1918, link-local, IPv6 ULA, and
+      // anything under the .internal / .local reserved suffixes — covering
+      // the older explicit Docker-internal hostname list as a subset.
+      const isAdmin = (request as any).user.isAdmin;
+      if (await isPrivateUrl(server)) {
+        if (!isAdmin) {
+          reply.status(400).send({ success: false, error: 'Private/internal server URLs are not allowed' });
+          return;
+        }
+        // Admin override — record that it happened so operational review
+        // can spot accidental/malicious private-URL saves after the fact.
+        const hostname = (() => { try { return new URL(server).hostname.toLowerCase(); } catch { return ''; } })();
+        request.log.info({ userId, hostname }, 'Admin saved Darkreel creds targeting a private/internal URL');
       }
 
       // Test connection before saving
