@@ -8,6 +8,7 @@ import { downloadVideo, selectBestVideo } from '../downloader/index.js';
 import { classifyUrl } from '../extractor/patterns.js';
 import { uploadToDarkreel } from '../hooks/darkreel.js';
 import { isVpnSwitching } from '../mullvad/index.js';
+import { isVpnHealthy, isVpnKillSwitchEnabled } from '../mullvad/health.js';
 import { isPrivateUrl } from '../utils/url.js';
 import { secureUnlink } from '../utils/fs.js';
 import { resolveProxy, type VpnPermissionStore } from '../server/vpn-permissions.js';
@@ -104,6 +105,14 @@ async function processJob(
 
   if (proxy && isVpnSwitching()) {
     store.update(jobId, { status: 'failed', error: 'VPN is switching countries, try again in a moment' });
+    return;
+  }
+
+  // Kill-switch check. If the tunnel is configured but unhealthy between job
+  // submission and execution, fail the job rather than issue outbound requests
+  // over a fallback route that would reveal the real source IP.
+  if (isVpnKillSwitchEnabled() && !isVpnHealthy()) {
+    store.update(jobId, { status: 'failed', error: 'VPN tunnel is not healthy — job blocked to prevent traffic leak' });
     return;
   }
 

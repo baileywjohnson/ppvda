@@ -4,6 +4,7 @@ import { loadConfig } from './config.js';
 import { buildApp } from './server/index.js';
 import { closeBrowser } from './extractor/index.js';
 import { setupMullvad, teardownMullvad } from './mullvad/index.js';
+import { startVpnHealthCheck, stopVpnHealthCheck } from './mullvad/health.js';
 import { createLogger } from './utils/logger.js';
 import { DB } from './db/index.js';
 import { SessionStore } from './auth/sessions.js';
@@ -67,6 +68,10 @@ async function main() {
       logger,
       config.vpnBypassHosts.length > 0 ? config.vpnBypassHosts : undefined,
     );
+    // Application-level kill-switch. Fails closed on init — if the tunnel is
+    // configured but the initial health probes don't pass, the app refuses to
+    // start rather than serve requests that could leak real-IP.
+    await startVpnHealthCheck(logger);
   }
 
   const app = await buildApp(config, db, sessions);
@@ -77,6 +82,7 @@ async function main() {
     process.on(signal, async () => {
       app.log.info(`Received ${signal}, shutting down...`);
       sessions.clear();
+      stopVpnHealthCheck();
       await app.close();
       await closeBrowser();
       db.close();

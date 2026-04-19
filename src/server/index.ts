@@ -1,6 +1,7 @@
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
+import type { preHandlerHookHandler } from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
@@ -12,6 +13,8 @@ import { getVpnStatus, getRelays, switchMullvadCountry, isVpnSwitching } from '.
 import { VpnPermissionStore } from './vpn-permissions.js';
 import { AppError } from '../utils/errors.js';
 import { setupAuth } from '../auth/index.js';
+import { requireVpnHealthy } from './vpn-killswitch.js';
+import { isVpnKillSwitchEnabled } from '../mullvad/health.js';
 import { JobStore } from '../jobs/store.js';
 import { createPipeline } from '../jobs/pipeline.js';
 import { healthRoutes } from './routes/health.js';
@@ -31,6 +34,14 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
       level: config.logLevel,
     },
     disableRequestLogging: true,
+    // Trust proxy headers only when the immediate source IP is loopback or an
+    // RFC1918/link-local/ULA address. The supported deployment (Docker+Caddy,
+    // see SECURITY.md) always routes requests through the Docker bridge gateway
+    // (172.16.0.0/12) after terminating TLS at Caddy on loopback. This lets the
+    // rate limiter see the real client IP from X-Forwarded-For rather than
+    // bucketing all traffic under one proxy address. Public-facing port 3000
+    // is firewalled by the setup script, so this cannot be abused externally.
+    trustProxy: 'loopback, uniquelocal',
   });
 
   const vpnPermissions = new VpnPermissionStore();
@@ -139,14 +150,26 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
     };
   });
 
+  // Compose authenticate + VPN kill-switch for routes whose outbound traffic
+  // could leak real-IP on tunnel drop. When the kill-switch is disabled (bare
+  // deploy, no MULLVAD_ACCOUNT), requireVpnHealthy is a no-op that always
+  // passes — so gated routes behave identically to plain authenticated ones.
+  const authAndVpn: preHandlerHookHandler = isVpnKillSwitchEnabled()
+    ? async (request, reply) => {
+        await authenticate(request, reply);
+        if (reply.sent) return;
+        await requireVpnHealthy(request, reply);
+      }
+    : authenticate;
+
   // Register routes
   await app.register(healthRoutes);
   await app.register(adminRoutes, { db, sessions, preHandler: authenticate, requireAdmin, vpnBypassHosts: config.vpnBypassHosts, vpnPermissions });
   await app.register(settingsRoutes, { db, sessions, preHandler: authenticate });
   await app.register(jobRoutes, { store: jobStore, pipeline, preHandler: authenticate });
-  await app.register(extractRoutes, { ...routeOpts, preHandler: authenticate });
-  await app.register(downloadRoutes, { ...routeOpts, preHandler: authenticate });
-  await app.register(streamDownloadRoutes, { ...routeOpts, preHandler: authenticate });
+  await app.register(extractRoutes, { ...routeOpts, preHandler: authAndVpn });
+  await app.register(downloadRoutes, { ...routeOpts, preHandler: authAndVpn });
+  await app.register(streamDownloadRoutes, { ...routeOpts, preHandler: authAndVpn });
   if (config.enableThumbnails) {
     await app.register(thumbnailRoutes, { ...routeOpts, preHandler: authenticate });
   }

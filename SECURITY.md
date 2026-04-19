@@ -15,7 +15,7 @@ PPVDA is a privacy-focused video extractor/downloader. It runs a headless Chromi
 ### Out of scope
 
 - **Browser-level zero-days in the bundled Chromium**. Playwright ships a pinned Chromium version; a zero-day against it is exploitable against any user-supplied page. See the `CVE tracking` section below for the live list. **PPVDA navigates arbitrary URLs, so this is a real and ongoing risk.**
-- **Compromise of the VPN layer**. The Mullvad/WireGuard kill-switch is enforced by the OS, not the application. If WireGuard drops mid-session, the app's next outbound request may traverse the default route. Until an application-level kill-switch lands (see `future work`), treat OS-level VPN failure as a leak.
+- **Compromise of the VPN layer itself** (e.g., Mullvad egress bugs, WireGuard cryptographic failures). Application-level kill-switch (see below) guards against tunnel failure but not against a successfully established tunnel that is itself compromised.
 - **Compromise of the Darkreel server**. PPVDA trusts the configured Darkreel server for upload confidentiality. End-to-end encryption is handled by `darkreel-cli`, so a compromised Darkreel server sees encrypted blobs only — but a hostile server can still DoS the CLI via crafted responses (bounded, see `darkreel-cli` SECURITY.md).
 - **Local attackers with shell access to the PPVDA host**. SQLite is unencrypted at rest; user Argon2 hashes are on disk. Pair with LUKS / FileVault / SQLCipher if backup theft is in your threat model.
 - **Same-UID attackers reading `/proc/<pid>/environ`** of the `darkreel-cli` subprocess during upload, which contains the user's decrypted Darkreel password.
@@ -33,7 +33,12 @@ Set `trustProxy` in Fastify **only** if PPVDA is deployed behind a trusted rever
 
 ### VPN configuration
 
-If `MULLVAD_ACCOUNT` is set, the Mullvad tunnel is brought up before the listener starts. Route exceptions for API gateways are resolved before the tunnel. **The kill-switch is OS-level.** If the tunnel drops at runtime, PPVDA does not currently detect this from the application layer. Route traffic only through `wg0` at the OS level via `iptables` / `nftables` / `pf` as appropriate.
+If `MULLVAD_ACCOUNT` is set, the Mullvad tunnel is brought up before the listener starts and route exceptions for API gateways are resolved before the tunnel. Two layers of defense follow:
+
+1. **OS kill-switch** — routing is configured so non-bypass traffic can only exit via `wg0`. Configure `iptables` / `nftables` / `pf` on the host (Docker `NET_ADMIN` capability is granted in `docker-compose.yml`).
+2. **Application kill-switch** — on startup, PPVDA runs initial interface + routing probes and refuses to serve traffic unless both pass. While running, it polls `/sys/class/net/wg0` every 5 s and curls `https://am.i.mullvad.net/connected` every 60 s; any persistent failure flips the in-process health flag, causing all `/extract*`, `/download*`, and `/stream-download*` routes (plus the background job pipeline) to return `503 VPN_KILL_SWITCH` until the tunnel recovers. See `src/mullvad/health.ts`.
+
+The application kill-switch is a no-op when `MULLVAD_ACCOUNT` is unset (bare deploy): routes behave as plain authenticated endpoints.
 
 ### Playwright CVE tracking
 
@@ -61,6 +66,5 @@ Only `main` is supported. The deploy workflow ships the latest commit to product
 
 ## Future work
 
-- Application-level VPN kill-switch (periodic `wg0` state check or Mullvad health endpoint curl, fail-closed on `/extract*`).
 - Short-lived scoped Darkreel upload tokens to replace the `DRK_PASS` subprocess-env flow.
 - Optional SQLCipher for at-rest DB encryption.
