@@ -123,7 +123,6 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
   const pipeline = createPipeline(jobStore, {
     ...routeOpts,
     maxConcurrentDownloads: config.maxConcurrentDownloads,
-    drkBinaryPath: config.drkBinaryPath,
     drkUploadTimeoutMs: config.drkUploadTimeoutMs,
   }, db, sessions, app.log);
 
@@ -136,7 +135,7 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
     const canToggle = isAdmin || vpnPermissions.canToggle(userId);
     return {
       enableThumbnails: config.enableThumbnails,
-      darkreelConfigured: db.hasDarkreelCreds(userId),
+      darkreelConfigured: db.hasDarkreelDelegation(userId),
       registrationEnabled: db.getSetting('allow_registration') === 'true',
       isAdmin,
       userId,

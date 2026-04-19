@@ -688,7 +688,10 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
       }
 
       sessions.deleteAllForUser(userId);
-      db.deleteDarkreelCreds(userId);
+      // User-deleting cascades handle the FK child rows, but explicit deletes
+      // run first so a FK misconfiguration still leaves no dangling secrets.
+      db.deleteDarkreelCreds(userId);       // legacy password rows (Shape 1)
+      db.deleteDarkreelDelegation(userId);  // Shape 2 delegation rows
       db.deleteUser(userId);
 
       reply.clearCookie('token', { path: '/' }).send({ success: true });

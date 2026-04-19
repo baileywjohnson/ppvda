@@ -778,15 +778,7 @@
     adminSection.hidden = true;
     settingsSection.hidden = false;
     sessionStorage.setItem('ppvda_view', 'settings');
-
-    try {
-      const res = await api('/settings/darkreel');
-      if (res.ok) {
-        const data = await res.json();
-        setDarkreelFormState(data.data.configured);
-        $('#dr-status').hidden = true;
-      }
-    } catch {}
+    await refreshDarkreelStatus();
   });
 
   settingsBackBtn.addEventListener('click', () => {
@@ -794,44 +786,84 @@
     showMainView();
   });
 
-  function setDarkreelFormState(configured) {
-    $('#darkreel-form').hidden = configured;
-    $('#dr-desc').hidden = configured;
-    $('#dr-configured-msg').hidden = !configured;
-    $('#dr-remove-btn').hidden = !configured;
+  // --- Darkreel Connect flow (Shape 2) ---
+
+  // Fills the "client URL" hint in the Authorize instructions with whatever
+  // origin the user is on. PPVDA self-hosters see their actual URL, which is
+  // the value they'll type into Darkreel's "Authorize an App" form.
+  const ppvdaClientUrlEl = $('#dr-client-url');
+  if (ppvdaClientUrlEl) ppvdaClientUrlEl.textContent = window.location.origin;
+
+  async function refreshDarkreelStatus() {
+    const status = $('#dr-status');
+    status.hidden = true;
+    try {
+      const res = await api('/settings/darkreel');
+      if (!res.ok) return;
+      const { data } = await res.json();
+      setDarkreelConnectedState(!!data.configured, data);
+      darkreelConfigured = !!data.configured;
+    } catch {
+      // Fall through — keep whatever state is shown; user can retry.
+    }
   }
 
-  // Darkreel creds form
-  $('#darkreel-form').addEventListener('submit', async (e) => {
+  function setDarkreelConnectedState(connected, data) {
+    $('#dr-disconnected').hidden = connected;
+    $('#dr-connected').hidden = !connected;
+    if (connected && data) {
+      $('#dr-connected-server').textContent = data.server_url ?? '';
+      $('#dr-connected-uid').textContent = (data.darkreel_user_id ?? '').slice(0, 8) + '…';
+      $('#dr-connected-at').textContent = data.connected_at ?? 'recently';
+    }
+  }
+
+  // Show the "go generate a code" hint once the user has typed a plausible URL.
+  const drServerInput = $('#dr-server');
+  const drAuthHint = $('#dr-auth-hint');
+  drServerInput.addEventListener('input', () => {
+    const val = drServerInput.value.trim();
+    drAuthHint.hidden = !(val.startsWith('http://') || val.startsWith('https://'));
+  });
+
+  // Connect form submission: exchange code + public key, server persists
+  // the encrypted refresh token.
+  $('#darkreel-connect-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const status = $('#dr-status');
     status.hidden = true;
     const btn = e.target.querySelector('button');
     btnLoading(btn);
 
+    const server = drServerInput.value.trim();
+    const code = $('#dr-auth-code').value.trim();
+    if (!server || !code) {
+      status.textContent = 'Enter both the server URL and the authorization code.';
+      status.className = 'settings-status error';
+      status.hidden = false;
+      btnReset(btn);
+      return;
+    }
+
     try {
-      const res = await api('/settings/darkreel', {
-        method: 'PUT',
+      const res = await api('/settings/darkreel/connect', {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          server: $('#dr-server').value,
-          username: $('#dr-username').value,
-          password: $('#dr-password').value,
-        }),
+        body: JSON.stringify({ server_url: server, authorization_code: code }),
       });
 
       if (res.ok) {
-        status.textContent = 'Credentials saved';
+        status.textContent = 'Connected to Darkreel';
         status.className = 'settings-status success';
         status.hidden = false;
         darkreelConfigured = true;
-        $('#dr-server').value = '';
-        $('#dr-username').value = '';
-        $('#dr-password').value = '';
-        setDarkreelFormState(true);
+        $('#dr-auth-code').value = '';
+        // Re-fetch status to populate the connected panel with the server's
+        // authoritative values rather than trusting the POST response.
+        await refreshDarkreelStatus();
       } else {
         const data = await res.json().catch(() => ({}));
-        status.textContent = data.error || 'Failed to save';
+        status.textContent = data.error || 'Failed to connect';
         status.className = 'settings-status error';
         status.hidden = false;
       }
@@ -844,22 +876,25 @@
     }
   });
 
-  // Remove Darkreel creds
-  $('#dr-remove-btn').addEventListener('click', async () => {
+  // Disconnect: drop the local delegation row. Does NOT revoke server-side;
+  // user revokes from Darkreel's "Connected Apps" if they want server-side
+  // invalidation too.
+  $('#dr-disconnect-btn').addEventListener('click', async () => {
     const status = $('#dr-status');
-    const btn = $('#dr-remove-btn');
+    status.hidden = true;
+    const btn = $('#dr-disconnect-btn');
     btnLoading(btn);
     try {
       const res = await api('/settings/darkreel', { method: 'DELETE' });
       if (res.ok) {
-        status.textContent = 'Credentials removed';
+        status.textContent = 'Disconnected. Revoke at Darkreel Settings → Connected Apps for full server-side revocation.';
         status.className = 'settings-status success';
         status.hidden = false;
         darkreelConfigured = false;
-        setDarkreelFormState(false);
+        setDarkreelConnectedState(false);
       }
     } catch {
-      status.textContent = 'Failed to remove';
+      status.textContent = 'Failed to disconnect';
       status.className = 'settings-status error';
       status.hidden = false;
     } finally {

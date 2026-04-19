@@ -12,7 +12,7 @@ import { isVpnHealthy, isVpnKillSwitchEnabled } from '../mullvad/health.js';
 import { isPrivateUrl } from '../utils/url.js';
 import { secureUnlink } from '../utils/fs.js';
 import { resolveProxy, type VpnPermissionStore } from '../server/vpn-permissions.js';
-import { getUserDarkreelCreds } from '../server/routes/settings.js';
+import { getUserDarkreelDelegation } from '../server/routes/settings.js';
 import type { VideoType, MediaType } from '../extractor/types.js';
 
 export interface PipelineOpts {
@@ -27,7 +27,6 @@ export interface PipelineOpts {
   blockedHosts: string[];
   allowedHosts: string[];
   maxConcurrentDownloads: number;
-  drkBinaryPath: string;
   drkUploadTimeoutMs: number;
   vpnPermissions: VpnPermissionStore;
 }
@@ -222,9 +221,9 @@ async function processJob(
     return;
   }
 
-  // Step 3: Upload to Darkreel (if user has creds configured)
-  const creds = getUserDarkreelCreds(db, sessions, userId);
-  if (creds) {
+  // Step 3: Upload to Darkreel (if the user has a Shape 2 delegation configured)
+  const delegation = getUserDarkreelDelegation(db, sessions, userId);
+  if (delegation) {
     store.update(jobId, { status: 'encrypting' });
 
     const job = store.get(jobId);
@@ -235,11 +234,15 @@ async function processJob(
 
     try {
       const result = await uploadToDarkreel({
-        drkBinaryPath: opts.drkBinaryPath,
-        serverUrl: creds.server,
-        username: creds.username,
-        password: creds.password,
+        conn: {
+          serverUrl: delegation.serverUrl,
+          userId: delegation.darkreelUserId,
+          delegationId: delegation.delegationId,
+          publicKey: delegation.publicKey,
+          refreshToken: delegation.refreshToken,
+        },
         filePath: job.filePath,
+        ffmpegPath: opts.ffmpegPath,
         timeoutMs: opts.drkUploadTimeoutMs,
       });
 

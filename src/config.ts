@@ -46,8 +46,7 @@ export interface AppConfig {
   dbPath: string;
   adminUsername: string;
   adminPassword: string;
-  // Darkreel (server-wide settings, creds are per-user in DB)
-  drkBinaryPath: string;
+  // Darkreel (per-user delegations in DB, no subprocess binary anymore)
   drkUploadTimeoutMs: number;
   // Jobs
   maxJobHistory: number;
@@ -89,7 +88,6 @@ export function loadConfig(): AppConfig {
     adminUsername: process.env.PPVDA_ADMIN_USERNAME ?? 'admin',
     adminPassword: process.env.PPVDA_ADMIN_PASSWORD ?? '',
     // Darkreel
-    drkBinaryPath: process.env.DRK_BINARY_PATH ?? 'darkreel-cli',
     drkUploadTimeoutMs: parseInt(process.env.DRK_UPLOAD_TIMEOUT_MS ?? '600000', 10),
     // Jobs
     maxJobHistory: parseInt(process.env.MAX_JOB_HISTORY ?? '100', 10),

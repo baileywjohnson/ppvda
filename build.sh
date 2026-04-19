@@ -22,8 +22,8 @@ CSS_VER=$(openssl dgst -sha256 public/css/app.css | awk '{print $NF}' | cut -c1-
 APP_VER=$(openssl dgst -sha256 public/js/app.js | awk '{print $NF}' | cut -c1-16)
 
 # Update integrity attributes and cache-busting version params in index.html.
-perl -i -pe "s|href=\"/css/app\.css(\?v=[a-f0-9]+)?\"(.*?)integrity=\"sha384-[A-Za-z0-9+/=]+\"|href=\"/css/app.css?v=${CSS_VER}\"\2integrity=\"${CSS_HASH}\"|" public/index.html
-perl -i -pe "s|src=\"/js/app\.js(\?v=[a-f0-9]+)?\"(.*?)integrity=\"sha384-[A-Za-z0-9+/=]+\"|src=\"/js/app.js?v=${APP_VER}\"\2integrity=\"${APP_HASH}\"|" public/index.html
+perl -i -pe "s|href=\"/css/app\.css(\?v=[^\"]+)?\"(.*?)integrity=\"sha384-[A-Za-z0-9+/=]+\"|href=\"/css/app.css?v=${CSS_VER}\"\2integrity=\"${CSS_HASH}\"|" public/index.html
+perl -i -pe "s|src=\"/js/app\.js(\?v=[^\"]+)?\"(.*?)integrity=\"sha384-[A-Za-z0-9+/=]+\"|src=\"/js/app.js?v=${APP_VER}\"\2integrity=\"${APP_HASH}\"|" public/index.html
 
 echo "SRI hashes updated:"
 echo "  app.css:  ${CSS_HASH}"

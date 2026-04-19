@@ -1,13 +1,20 @@
-import { spawn } from 'node:child_process';
+import { refreshAccessToken, uploadFile, type DarkreelConnection } from '../darkreel/client.js';
 
-export interface DrkUploadOptions {
-  drkBinaryPath: string;
-  serverUrl: string;
-  username: string;
-  password: string;
-  filePath: string;
-  timeoutMs: number;
-}
+// Shape 2 Darkreel upload hook. Replaces the previous darkreel-cli subprocess
+// spawn with a native Node implementation that speaks the sealed-box upload
+// protocol directly.
+//
+// What PPVDA holds at rest (in darkreel_delegations):
+//   - the user's Darkreel server URL
+//   - the user's Darkreel user_id (opaque)
+//   - the delegation_id (for server-side revocation UI)
+//   - the user's Darkreel X25519 PUBLIC key (32 bytes, public by definition)
+//   - the refresh token, AES-GCM-wrapped under the PPVDA user's master key
+//
+// What PPVDA does NOT hold at rest: any private key, any symmetric decryption
+// key for Darkreel content, any password. A PPVDA compromise that extracts
+// this table grants "upload junk to connected Darkreel accounts until the
+// user revokes" — nothing else. That's the Shape 2 blast-radius property.
 
 export interface DrkUploadResult {
   success: boolean;
@@ -15,79 +22,55 @@ export interface DrkUploadResult {
   detail?: string;
 }
 
+export interface DrkUploadOptions {
+  conn: DarkreelConnection;
+  filePath: string;
+  ffmpegPath: string;
+  timeoutMs: number;
+}
+
 /**
- * Spawns the `drk upload` CLI to encrypt and upload a file to Darkreel.
- * Credentials are passed via environment variables (DRK_SERVER, DRK_USER, DRK_PASS)
- * instead of CLI arguments to prevent exposure in `ps aux` / /proc/pid/cmdline.
+ * Encrypt and upload a single file to Darkreel using a connected delegation.
+ * The refresh token in conn is traded for a short-lived upload-scoped JWT,
+ * per-file symmetric keys are generated and sealed to conn.publicKey, and
+ * the file is streamed chunk-by-chunk with AES-256-GCM.
+ *
+ * Returns { success: false, error: ... } on any failure; never throws.
  */
 export async function uploadToDarkreel(opts: DrkUploadOptions): Promise<DrkUploadResult> {
-  const { drkBinaryPath, serverUrl, username, password, filePath, timeoutMs } = opts;
+  const { conn, filePath, ffmpegPath, timeoutMs } = opts;
 
-  // Only pass the file path as a CLI arg — credentials go through env vars.
-  // Allow plaintext HTTP if the server URL isn't HTTPS (e.g., Docker internal
-  // networking or reverse-proxy setups where TLS terminates upstream).
-  const args = ['upload'];
-  if (!serverUrl.startsWith('https://')) {
-    args.push('-insecure');
+  let accessToken: string;
+  try {
+    accessToken = await refreshAccessToken(conn.serverUrl, conn.refreshToken);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown';
+    // Refresh-token rejection usually means the user revoked the delegation
+    // from Darkreel's "Connected Apps" panel — surface that specifically so
+    // the UI can prompt re-connect.
+    if (msg.includes('Refresh token rejected') || msg.includes('401')) {
+      return {
+        success: false,
+        error: 'Darkreel delegation has been revoked — reconnect from PPVDA Settings',
+      };
+    }
+    return {
+      success: false,
+      error: 'Could not reach Darkreel server — check the server URL in Settings',
+      detail: msg,
+    };
   }
-  args.push(filePath);
 
-  const env: Record<string, string> = {
-    PATH: process.env.PATH ?? '',
-    HOME: process.env.HOME ?? '',
-    DRK_SERVER: serverUrl,
-    DRK_USER: username,
-    DRK_PASS: password,
-  };
-
-  return new Promise<DrkUploadResult>((resolve, reject) => {
-    const proc = spawn(drkBinaryPath, args, {
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    const timeout = setTimeout(() => {
-      proc.kill('SIGKILL');
-      reject(new Error(`drk upload timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    proc.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-
-    proc.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on('close', (code) => {
-      clearTimeout(timeout);
-      if (code === 0) {
-        resolve({ success: true });
-      } else {
-        // Detect auth failures from CLI output
-        const combined = (stdout + stderr).toLowerCase();
-        if (combined.includes('401') || combined.includes('invalid credentials') || combined.includes('login failed')) {
-          resolve({ success: false, error: 'Darkreel authentication failed — check your credentials in Settings' });
-        } else if (combined.includes('connect') || combined.includes('no such host') || combined.includes('connection refused')) {
-          resolve({ success: false, error: 'Could not connect to Darkreel server — check the server URL in Settings' });
-        } else {
-          // Log the CLI's stderr for debugging — it only contains high-level
-          // status ("FAILED", "Done: N uploaded, M failed"), not sensitive data.
-          resolve({ success: false, error: `Upload failed (exit code ${code})`, detail: stderr.trim() || undefined });
-        }
-      }
-    });
-
-    proc.on('error', (err) => {
-      clearTimeout(timeout);
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        resolve({ success: false, error: `drk binary not found at: ${drkBinaryPath}` });
-      } else {
-        resolve({ success: false, error: 'Upload process failed to start' });
-      }
-    });
-  });
+  try {
+    await uploadFile({ conn, accessToken, filePath, ffmpegPath, timeoutMs });
+    return { success: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown';
+    // Detect upload-endpoint scope/auth failures separately so users see
+    // actionable messages rather than opaque 4xx text.
+    if (msg.includes('403')) {
+      return { success: false, error: 'Darkreel rejected the upload — the delegation may be scope-limited or revoked' };
+    }
+    return { success: false, error: 'Darkreel upload failed', detail: msg };
+  }
 }

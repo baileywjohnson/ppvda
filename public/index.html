@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎭</text></svg>">
   <title>PPVDA</title>
-  <link rel="stylesheet" href="/css/app.css?v=UxzvKDvu" integrity="sha384-UxzvKDvuDS9HFDhMRvno0yXvqViM+ri0IXxdvy+3L8VD3n25Qv/7nz+7eCX7Nkxb" crossorigin="anonymous">
+  <link rel="stylesheet" href="/css/app.css?v=26bffae434d779fc" integrity="sha384-h//GuZnib4CGOg/BI11CWeZiPLtqENAgwa9R+qnmu5SF3UfMLWXXVqRPuiWREGkt" crossorigin="anonymous">
 </head>
 <body>
   <div id="login-view" hidden>
@@ -111,15 +111,29 @@
 
       <div class="settings-group">
         <h3>Darkreel Integration</h3>
-        <p class="settings-desc" id="dr-desc">Configure your Darkreel server credentials. They are encrypted and stored securely.</p>
-        <p class="settings-desc" id="dr-configured-msg" hidden>Credentials are configured and encrypted.</p>
-        <form id="darkreel-form">
-          <input type="url" id="dr-server" placeholder="Darkreel server URL" required>
-          <input type="text" id="dr-username" placeholder="Darkreel username" autocomplete="off" required>
-          <input type="password" id="dr-password" placeholder="Darkreel password" autocomplete="off" required>
-          <button type="submit">Save Credentials</button>
-        </form>
-        <button type="button" id="dr-remove-btn" class="btn-danger" hidden>Remove Credentials</button>
+
+        <!-- Disconnected: Connect flow (copy-paste authorization code) -->
+        <div id="dr-disconnected">
+          <p class="settings-desc">PPVDA can upload downloaded videos to your Darkreel account. Connecting grants <strong>upload only</strong> — PPVDA never receives a password or any ability to read your existing library. You can revoke access any time from Darkreel's "Connected Apps" panel.</p>
+          <form id="darkreel-connect-form">
+            <label class="dr-label">1. Your Darkreel server URL</label>
+            <input type="url" id="dr-server" placeholder="https://darkreel.example.com" required autocomplete="off">
+            <p class="settings-hint" id="dr-auth-hint" hidden>
+              2. Log in to the Darkreel URL above, go to <strong>Settings → Authorize an App</strong>, enter client name <code>PPVDA</code> and URL <code id="dr-client-url"></code>, and click <strong>Generate Code</strong>.
+            </p>
+            <label class="dr-label">3. Paste the authorization code</label>
+            <input type="text" id="dr-auth-code" placeholder="Authorization code (32 characters)" autocomplete="off">
+            <button type="submit">Connect</button>
+          </form>
+        </div>
+
+        <!-- Connected: status + disconnect -->
+        <div id="dr-connected" hidden>
+          <p class="settings-desc">Connected to <code id="dr-connected-server"></code> as Darkreel user <code id="dr-connected-uid"></code>.</p>
+          <p class="settings-desc settings-hint">Connected <span id="dr-connected-at"></span>. This connection lets PPVDA upload files to your Darkreel library but <strong>cannot</strong> read, list, delete, or modify anything — PPVDA holds only your public key.</p>
+          <button type="button" id="dr-disconnect-btn" class="btn-danger">Disconnect</button>
+        </div>
+
         <p id="dr-status" class="settings-status" hidden></p>
       </div>
 
@@ -212,6 +226,6 @@
     </section>
   </div>
 
-  <script src="/js/app.js?v=jM2tYIkN" integrity="sha384-jM2tYIkN5hV/gLcGrmReNcgnBROp1fO5QFOgXH/KgFbUOCDwo+MM45WdKDvRLT8u" crossorigin="anonymous"></script>
+  <script src="/js/app.js?v=37e56ef7026d1969" integrity="sha384-095Pa6sAgQEup0YGqD1aNsrsEypjYUKE3nvv62owUyGq3vjDwSQnWgJbCtUn0WD/" crossorigin="anonymous"></script>
 </body>
 </html>
