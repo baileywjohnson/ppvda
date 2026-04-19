@@ -1,29 +1,24 @@
 import dotenv from 'dotenv';
-import { randomBytes } from 'node:crypto';
 
 dotenv.config();
 
+// JWT_SECRET is required in every environment. A dev-only ephemeral fallback
+// masks deployment misconfiguration — if NODE_ENV is unset or ambiguous, a
+// production instance would silently generate a random secret, issue tokens,
+// and invalidate them on the next restart. Requiring it up-front surfaces the
+// problem at startup instead of in production.
 function getJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
-  if (secret) {
-    if (secret.length < 32) {
-      throw new Error('JWT_SECRET must be at least 32 characters');
-    }
-    return secret;
-  }
-  if (process.env.NODE_ENV === 'production') {
+  if (!secret) {
     throw new Error(
-      'JWT_SECRET is required in production. Generate one with:\n' +
+      'JWT_SECRET is required. Generate one with:\n' +
       '  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"',
     );
   }
-  // Generate a strong ephemeral secret — warn that sessions won't survive restarts
-  console.warn(
-    'WARNING: JWT_SECRET not set — using random secret. Sessions will not survive server restarts.\n' +
-    '  Set JWT_SECRET to a random string of 32+ characters for production use.\n' +
-    '  Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"',
-  );
-  return randomBytes(32).toString('hex');
+  if (secret.length < 32) {
+    throw new Error('JWT_SECRET must be at least 32 characters');
+  }
+  return secret;
 }
 
 export interface AppConfig {
