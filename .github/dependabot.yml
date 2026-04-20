@@ -13,9 +13,6 @@ updates:
         update-types:
           - minor
           - patch
-    # Playwright ships Chromium patches on a fast cadence; get each one as its
-    # own PR so security updates aren't held up behind unrelated changes.
-    ignore: []
 
   - package-ecosystem: github-actions
     directory: "/"
