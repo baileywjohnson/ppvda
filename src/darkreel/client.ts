@@ -4,6 +4,7 @@ import { basename } from 'node:path';
 import { encryptBlock } from '../crypto/index.js';
 import { seal } from './crypto.js';
 import { detectMediaType, generateThumbnail, type MediaType } from './thumbnail.js';
+import { probeLocalFile, padToBucket } from './probe.js';
 
 // Native Darkreel client. Replaces the spawn(darkreel-cli) hook with pure
 // Node code that speaks the Phase 2 sealed-box upload protocol directly.
@@ -154,14 +155,31 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
 
     // Metadata blob, encrypted under its own key (not the master key) so a
     // delegated client can write metadata without ever holding the master.
-    const metaPlain = Buffer.from(JSON.stringify({
+    //
+    // For images and videos we probe the file with ffprobe so the Darkreel
+    // gallery can display width/height/duration alongside the name. Best-
+    // effort: a probe failure (no ffprobe, bad file, timeout) just omits
+    // the optional fields.
+    const meta: Record<string, unknown> = {
       name: fileName,
       media_type: mediaType,
       mime_type: mimeFromExt(fileName) ?? 'application/octet-stream',
       size: fileSize,
       chunk_count: chunkCount,
-    }), 'utf-8');
-    const metaEnc = encryptBlock(metaPlain, metadataKey, mediaIDBytes);
+    };
+    if (mediaType === 'video' || mediaType === 'image') {
+      const info = await probeLocalFile(filePath, ffmpegPath);
+      if (info.width !== undefined) meta.width = info.width;
+      if (info.height !== undefined) meta.height = info.height;
+      if (info.duration !== undefined && mediaType === 'video') meta.duration = info.duration;
+    }
+    // Pad to a power-of-2 bucket (min 512 B) before encryption. Matches the
+    // darkreel-cli / Darkreel-browser scheme: JSON.parse ignores trailing
+    // spaces, so the SPA decrypts without any unpadding logic. Bucket
+    // hides payload size from DB-level observers — ciphertext length no
+    // longer correlates with "how long is the filename" etc.
+    const metaPadded = padToBucket(Buffer.from(JSON.stringify(meta), 'utf-8'), 512);
+    const metaEnc = encryptBlock(Buffer.from(metaPadded.buffer, metaPadded.byteOffset, metaPadded.byteLength), metadataKey, mediaIDBytes);
     // encryptBlock returns nonce(12) || ct || tag; server wants them split.
     const metadataNonce = metaEnc.subarray(0, 12);
     const metadataCiphertext = metaEnc.subarray(12);
