@@ -34,12 +34,12 @@
 - **Video metadata** — Duration, resolution, and file size probed in real time via ffprobe
 - **Streaming download** — Videos pipe through ffmpeg directly to your browser. No temp files on the server, and the downloaded file has a different hash from the original
 - **Ad filtering** — Built-in blocklist of ~28 ad-tech domains, plus size/duration filtering
-- **Darkreel integration** — Background jobs: download, encrypt via [darkreel-cli](https://github.com/baileywjohnson/darkreel-cli), upload to your encrypted library, securely delete local file
+- **Darkreel integration** — Background jobs: download, encrypt in-process (X25519 sealed-box to your Darkreel public key), upload to your encrypted library, securely delete local file. PPVDA never holds your Darkreel password — connect once via a copy-paste authorization code and revoke anytime from Darkreel's Connected Apps panel
 - **Mullvad VPN** — Built-in WireGuard tunnel. All extraction and download traffic routes through Mullvad with country switching from the admin panel
 - **Proxy support** — Route traffic through SOCKS4/5 or HTTP/HTTPS proxies as an alternative to Mullvad
 - **Multi-user** — Self-registration (admin-toggleable) or admin-managed user creation. Each user gets an independent master key and configures their own Darkreel credentials
 - **Account recovery** — Recovery codes generated on registration and password change. The only way to recover an account if the password is forgotten
-- **Encrypted credential storage** — Darkreel server/username/password encrypted at rest with AES-256-GCM, per-user master keys with AAD binding
+- **Delegation-based Darkreel credentials** — PPVDA stores a scoped refresh token + your Darkreel X25519 public key, AES-256-GCM encrypted at rest under each user's master key. No Darkreel password is ever held — a full PPVDA compromise grants upload-only capability, not read/list/delete on existing media
 - **Host filtering** — Allow, block, or prioritize videos from specific domains
 - **Concurrency control** — Configurable limits on parallel downloads and extractions
 - **Image extraction** — Optionally discover and download images alongside videos
@@ -226,7 +226,7 @@ sudo ./update.sh --uninstall  # remove cron
 | Video URLs | No | Only in browser memory during extraction |
 | Downloaded files | No | Securely overwritten and deleted after job completion |
 | Download history | No | Job metadata cleared from memory when jobs finish |
-| Darkreel credentials | Encrypted at rest | AES-256-GCM with AAD, per-user master key |
+| Darkreel delegation (refresh token + public key) | Encrypted at rest | AES-256-GCM with AAD, per-user master key. Passwords are never stored — see "Darkreel integration" below. |
 | Usernames | Yes (plaintext) | Use non-identifying usernames |
 | Passwords | Hashed (Argon2id) | Separate auth salt per user (t=3, m=64MB, p=4) |
 | Master keys | Encrypted at rest | Encrypted with password-derived key + recovery code |
@@ -243,13 +243,14 @@ User Password ────┤
                                                            |
                                                        master_key (RAM only)
                                                            |
-                                  Decrypts: darkreel_creds (AES-256-GCM, AAD=userID)
+                                  Decrypts: darkreel_delegations.encrypted_refresh_token
+                                            (AES-256-GCM, AAD=userID)
 
 Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> master_key
 ```
 
-- Database stolen? Encrypted blobs are useless without a user's password or recovery code.
-- Server compromised? Attacker cannot retroactively decrypt stored credentials.
+- Database stolen? The refresh token is useless without a live PPVDA user session (which holds the master key). Even if an attacker unwraps every stored refresh token, they get **upload-only** capability against each user's Darkreel library — they cannot read, list, or delete any existing media, because PPVDA holds only the user's Darkreel public key.
+- Server compromised? Same upper bound as database theft — PPVDA never had decryption capability to begin with.
 - Server restarted? All sessions cleared, users must re-login.
 - Forgot password? Recovery code decrypts the master key, allowing a full password reset.
 
@@ -262,11 +263,11 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
 - **Per-username rate limiting** — 10 login/recovery attempts per username per 15 minutes, defending against distributed brute-force even when per-IP limits are bypassed
 - **Session isolation** — Sessions indexed by random session ID (not user ID), with session ID embedded in JWT. Password changes and recovery invalidate all existing sessions
 - **SSRF protection** — All URLs validated against private IP ranges, IPv6 loopback/link-local/unique-local, and IPv4-mapped IPv6 addresses. DNS resolution checked twice with a 500ms delay to detect rebinding attacks. DNS failures rejected (fail-closed). HTTP redirect targets re-validated. Extracted video URLs re-validated before download
-- **No shell injection** — All subprocesses (ffmpeg, darkreel-cli) spawned with argument arrays, never through a shell. Credentials passed via environment variables
+- **No shell injection** — All subprocesses (ffmpeg, ffprobe) spawned with argument arrays, never through a shell. No Darkreel password ever passes through a subprocess environment — the Darkreel client is in-process Node
 - **Admin re-verification** — Admin status verified from the database on every privileged request. Revoking admin access takes effect immediately
 - **Rate limiting** — 100 requests/min globally, 5/min on login/register/recover endpoints
 - **Cookie security** — httpOnly, SameSite=strict, Secure in production. No tokens in localStorage or query parameters
-- **Minimal subprocess environment** — ffmpeg and darkreel-cli receive only PATH, HOME, and TMPDIR. Secrets like JWT_SECRET and MULLVAD_ACCOUNT are not leaked
+- **Minimal subprocess environment** — ffmpeg receives only PATH, HOME, and TMPDIR. Secrets like JWT_SECRET and MULLVAD_ACCOUNT are not leaked
 - **Security headers** — CSP, HSTS, Permissions-Policy, X-Frame-Options, X-Content-Type-Options, Referrer-Policy on all responses
 - **VPN bypass validation** — Hostnames and IPs in `VPN_BYPASS_HOSTS` validated before writing to system routes and `/etc/hosts`
 - **No request logging** — URLs never appear in server logs. Rate limiting and session state are in-memory only and cleared on restart
@@ -312,17 +313,21 @@ If a user forgets their password, they can reset it using their recovery code vi
 
 ## Darkreel integration
 
-Each user configures their own Darkreel credentials in **Settings**. Credentials are validated (test login) before being saved and encrypted at rest with the user's master key.
+PPVDA uploads to [Darkreel](https://github.com/baileywjohnson/darkreel) using the **delegation protocol** — PPVDA never holds your Darkreel password. Instead, each user connects their account once via a copy-paste authorization code; PPVDA stores a scoped refresh token and your public key, and uploads by sealing per-file AES keys directly to that public key.
 
-The upload pipeline: **download → encrypt (darkreel-cli) → upload to Darkreel → secure delete local file**. Credentials are passed to darkreel-cli via environment variables (never CLI arguments).
+**Blast-radius property:** a full compromise of PPVDA gives an attacker the ability to upload junk to your Darkreel library until you revoke. It does **not** give them read access to existing media, list access, delete capability, or any other account authority, because PPVDA holds only the public half of your X25519 keypair.
+
+The upload pipeline: **download → encrypt (in-process, sealed-box to user's public key) → upload to Darkreel → secure delete local file**. No subprocess, no Darkreel password in environment variables, no `darkreel-cli` binary needed.
 
 To set up:
 
-1. Deploy a [Darkreel](https://github.com/baileywjohnson/darkreel) server
-2. Ensure `darkreel-cli` is available (included in the Docker image, or [install manually](https://github.com/baileywjohnson/darkreel-cli#install))
-3. In PPVDA, go to **Settings** and enter your Darkreel server URL, username, and password
+1. Deploy a [Darkreel](https://github.com/baileywjohnson/darkreel) server (schema v2 required).
+2. In Darkreel, go to **Settings → Authorize an App**, enter `PPVDA` as the client name and your PPVDA URL, then click **Generate Code**. The code expires in 2 minutes and can only be used once.
+3. In PPVDA, go to **Settings → Darkreel Integration**, enter your Darkreel server URL and paste the code, then click **Connect**.
 
-Docker-internal hostnames (`host.docker.internal`, `gateway.docker.internal`, `host.containers.internal`) are allowed only for admin users, since they enable reaching services on the Docker host. Regular users must use a public URL or IP.
+Revoke access anytime from Darkreel's **Settings → Connected Apps** (server-side) or PPVDA's **Settings → Darkreel Integration → Disconnect** (local only). A Darkreel-side revoke takes effect on PPVDA's next upload attempt (within 1 hour of access-token expiry).
+
+Private/internal server URLs (`127.0.0.1`, `192.168.*`, `.internal` / `.local` hostnames, RFC1918 ranges) are allowed only for admin users, since they let PPVDA pivot its network position on the deployment host. Regular users must use a public URL or hostname.
 
 ## API
 
@@ -366,9 +371,9 @@ All endpoints except `/health`, `/auth/login`, `/auth/register`, `/auth/recover`
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/settings/darkreel` | Check if Darkreel is configured |
-| PUT | `/settings/darkreel` | Save Darkreel credentials |
-| DELETE | `/settings/darkreel` | Remove Darkreel credentials |
+| GET | `/settings/darkreel` | Check if Darkreel is connected; returns `{ configured, server_url, darkreel_user_id, connected_at }` |
+| POST | `/settings/darkreel/connect` | Exchange a Darkreel authorization code for a refresh token and store it encrypted under the user's master key |
+| DELETE | `/settings/darkreel` | Drop the local delegation row (server-side revocation is a separate click in Darkreel's Connected Apps UI) |
 
 ### Admin
 
@@ -417,12 +422,11 @@ All configuration is via environment variables (or `.env` file).
 | `JWT_SECRET` | random (dev), **required** (prod) | JWT signing secret. Required when `NODE_ENV=production`. Set to a random 32+ character string for persistent sessions across restarts. |
 | `DB_PATH` | `./data/ppvda.db` | SQLite database path |
 
-### Darkreel CLI
+### Darkreel uploads
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DRK_BINARY_PATH` | `darkreel-cli` | Path to darkreel-cli binary |
-| `DRK_UPLOAD_TIMEOUT_MS` | `600000` | Upload timeout (10 min) |
+| `DRK_UPLOAD_TIMEOUT_MS` | `600000` | Native upload timeout (10 min). No subprocess — uploads happen in-process via Node's Web Crypto. |
 
 ### Extraction and download
 
