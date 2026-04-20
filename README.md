@@ -411,6 +411,7 @@ All configuration is via environment variables (or `.env` file).
 | `FFMPEG_PATH` | `ffmpeg` | Path to ffmpeg binary |
 | `MAX_CONCURRENT_DOWNLOADS` | `3` | Max parallel download/upload jobs |
 | `MAX_CONCURRENT_EXTRACTIONS` | `3` | Max parallel Playwright browser extractions |
+| `MAX_CONCURRENT_FFMPEG_ROUTES` | `MAX_CONCURRENT_DOWNLOADS` | Max parallel ffmpeg processes from `/stream-download` and `/thumbnail` |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 ### Authentication

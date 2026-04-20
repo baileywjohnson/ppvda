@@ -13,6 +13,7 @@ import { isVpnSwitching } from '../../mullvad/index.js';
 import { isDirectMediaUrl } from '../../extractor/patterns.js';
 import { resolveProxy, type VpnPermissionStore } from '../vpn-permissions.js';
 import { getHttpAgent } from '../../proxy/index.js';
+import { ffmpegRouteSem } from './ffmpeg-concurrency.js';
 
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif', '.bmp', '.tiff']);
 
@@ -170,6 +171,7 @@ async function handleVideoDownload(
   await ensureDir(tempDir);
   const tempPath = join(tempDir, `stream-${generateId()}.mp4`);
 
+  await ffmpegRouteSem.acquire();
   try {
     await runFfmpeg({
       inputUrl: videoUrl,
@@ -203,6 +205,8 @@ async function handleVideoDownload(
   } catch {
     await secureUnlink(tempPath);
     reply.status(502).send({ success: false, error: 'Failed to download video' });
+  } finally {
+    ffmpegRouteSem.release();
   }
 }
 

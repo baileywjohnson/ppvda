@@ -42,9 +42,7 @@ The application kill-switch is a no-op when `MULLVAD_ACCOUNT` is unset (bare dep
 
 ### Playwright CVE tracking
 
-Playwright ships a pinned Chromium. When a Chromium CVE affects navigation (particularly CVEs affecting renderer, CSS, or JS engines), PPVDA is affected until the Playwright team tags a release containing the Chromium roll. Subscribe to [Playwright releases](https://github.com/microsoft/playwright/releases) and upgrade the pin promptly after any security-roll release. The current Chromium version can be checked in the repo's `package-lock.json`; compare against [chromereleases.googleblog.com](https://chromereleases.googleblog.com/).
-
-Current known issue: **CVE-2026-2441** (use-after-free in Chromium CSS, actively exploited). Playwright 1.59.x ships the vulnerable Chromium 145; a fix has landed on Playwright main but not yet in a tagged release. See the tracking comment in `src/extractor/index.ts`.
+Playwright ships a pinned Chromium. When a Chromium CVE affects navigation (particularly CVEs affecting renderer, CSS, or JS engines), PPVDA is affected until the Playwright team tags a release containing the Chromium roll. Dependabot (see `.github/dependabot.yml`) opens a PR for every Playwright release so Chromium security rolls land as their own reviewable change — upgrade these promptly. The current Chromium version can be checked in `package-lock.json`; compare against [chromereleases.googleblog.com](https://chromereleases.googleblog.com/).
 
 ### Database at rest
 

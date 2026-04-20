@@ -3,6 +3,7 @@ import { spawnFfmpegStream } from '../../downloader/ffmpeg.js';
 import type { ProxyConfig } from '../../proxy/types.js';
 import { isPrivateUrl } from '../../utils/url.js';
 import { getHttpAgent } from '../../proxy/index.js';
+import { ffmpegRouteSem } from './ffmpeg-concurrency.js';
 
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif', '.bmp', '.tiff']);
 
@@ -139,59 +140,64 @@ async function handleVideoThumbnail(
     return;
   }
 
-  const { proc, stdout, kill } = spawnFfmpegStream({
-    inputUrl: videoUrl,
-    ffmpegPath: opts.ffmpegPath,
-    proxyConfig: opts.proxyConfig,
-    timeoutMs: 15000,
-    args: [
-      '-y',
-      '-i', videoUrl,
-      '-ss', seekTime,
-      '-frames:v', '1',
-      '-vf', 'scale=320:-1',
-      '-f', 'image2pipe',
-      '-vcodec', 'mjpeg',
-      'pipe:1',
-    ],
-  });
-
-  const MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024; // 5 MB — a single JPEG frame is ~50-200 KB
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-  let aborted = false;
-
-  stdout.on('data', (chunk: Buffer) => {
-    totalBytes += chunk.length;
-    if (totalBytes > MAX_THUMBNAIL_BYTES) {
-      if (!aborted) {
-        aborted = true;
-        kill();
-      }
-      return;
-    }
-    chunks.push(chunk);
-  });
-
-  const result = await new Promise<Buffer | null>((resolve) => {
-    proc.on('close', (code) => {
-      if (!aborted && code === 0 && chunks.length > 0) {
-        resolve(Buffer.concat(chunks));
-      } else {
-        resolve(null);
-      }
+  await ffmpegRouteSem.acquire();
+  try {
+    const { proc, stdout, kill } = spawnFfmpegStream({
+      inputUrl: videoUrl,
+      ffmpegPath: opts.ffmpegPath,
+      proxyConfig: opts.proxyConfig,
+      timeoutMs: 15000,
+      args: [
+        '-y',
+        '-i', videoUrl,
+        '-ss', seekTime,
+        '-frames:v', '1',
+        '-vf', 'scale=320:-1',
+        '-f', 'image2pipe',
+        '-vcodec', 'mjpeg',
+        'pipe:1',
+      ],
     });
-    proc.on('error', () => resolve(null));
-  });
 
-  request.raw.on('close', () => kill());
+    const MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024; // 5 MB — a single JPEG frame is ~50-200 KB
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let aborted = false;
 
-  if (result) {
-    reply
-      .header('Content-Type', 'image/jpeg')
-      .header('Cache-Control', 'private, max-age=300')
-      .send(result);
-  } else {
-    reply.status(404).send({ success: false, error: 'Could not generate thumbnail' });
+    stdout.on('data', (chunk: Buffer) => {
+      totalBytes += chunk.length;
+      if (totalBytes > MAX_THUMBNAIL_BYTES) {
+        if (!aborted) {
+          aborted = true;
+          kill();
+        }
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    const result = await new Promise<Buffer | null>((resolve) => {
+      proc.on('close', (code) => {
+        if (!aborted && code === 0 && chunks.length > 0) {
+          resolve(Buffer.concat(chunks));
+        } else {
+          resolve(null);
+        }
+      });
+      proc.on('error', () => resolve(null));
+    });
+
+    request.raw.on('close', () => kill());
+
+    if (result) {
+      reply
+        .header('Content-Type', 'image/jpeg')
+        .header('Cache-Control', 'private, max-age=300')
+        .send(result);
+    } else {
+      reply.status(404).send({ success: false, error: 'Could not generate thumbnail' });
+    }
+  } finally {
+    ffmpegRouteSem.release();
   }
 }

@@ -91,14 +91,9 @@ async function getBrowser(proxy?: ProxyConfig): Promise<Browser> {
   }
 
   if (!browserInstance) {
-    // KNOWN RISK: Playwright 1.59.x bundles Chromium 145.x, which contains
-    // CVE-2026-2441 (actively exploited use-after-free in CSS handling).
-    // Since this browser navigates arbitrary user-supplied URLs, a hostile
-    // page can trigger the UAF. The Chromium 146 roll has landed on the
-    // Playwright main branch but is not yet in a tagged release.
-    // Track: https://github.com/microsoft/playwright/issues/39574
-    // Mitigation: upgrade the `playwright` dep as soon as a release ships
-    // Chromium 146.0.7680.31 or newer.
+    // This browser navigates arbitrary user-supplied URLs, so the bundled
+    // Chromium is a direct exposure surface. Keep `playwright` on the latest
+    // patch release — dependabot opens weekly PRs (.github/dependabot.yml).
     browserInstance = await chromium.launch({
       headless: true,
       args: [
