@@ -25,6 +25,16 @@ export function generateWgConfig(device: DeviceInfo, server: RelayServer, gatewa
   //    original gateway instead of looping through the tunnel.
   // 2. api.mullvad.net (146.70.25.66) — so relay list fetches and device
   //    management still work after the tunnel replaces the default route.
+  //
+  // PreDown restores the original default route via ${gw}. PostUp uses
+  // `replace default dev wg0` which destroys the pre-existing default,
+  // and without a symmetric restore, tearing down the tunnel (e.g., on a
+  // VPN country switch) leaves the container with no default route at
+  // all. The next `startTunnel` then fails at wg-quick's
+  // `ip route add <server>/32 via <gw>` step because on-link gateway
+  // lookup needs a default route to succeed on some kernels.
+  // `ip route replace` is idempotent so it's safe regardless of what the
+  // default-route state was when PreDown ran.
   const gw = gateway ?? '172.17.0.1';
   return `[Interface]
 PrivateKey = ${device.privateKey}
@@ -32,7 +42,7 @@ Address = ${device.ipv4Address}
 DNS = 10.64.0.1
 Table = off
 PostUp = ip route add ${server.ipv4AddrIn}/32 via ${gw} && ip route replace default dev ${WG_INTERFACE}
-PreDown = ip route del default dev ${WG_INTERFACE} ; ip route del ${server.ipv4AddrIn}/32 via ${gw}
+PreDown = ip route replace default via ${gw} ; ip route del ${server.ipv4AddrIn}/32 via ${gw}
 
 [Peer]
 PublicKey = ${server.publicKey}
