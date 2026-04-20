@@ -173,6 +173,9 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
       if (info.height !== undefined) meta.height = info.height;
       if (info.duration !== undefined && mediaType === 'video') meta.duration = info.duration;
     }
+    // Videos go out as fragmented MP4 (see downloader/ffmpeg.ts), so the SPA
+    // viewer can play them via MSE instead of downloading the whole file first.
+    if (mediaType === 'video') meta.fragmented = true;
     // Pad to a power-of-2 bucket (min 512 B) before encryption. Matches the
     // darkreel-cli / Darkreel-browser scheme: JSON.parse ignores trailing
     // spaces, so the SPA decrypts without any unpadding logic. Bucket

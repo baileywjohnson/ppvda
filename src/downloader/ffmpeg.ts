@@ -41,7 +41,9 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
     '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     '-i', inputUrl,          // input URL
     '-c', 'copy',            // copy codecs (no re-encoding)
-    '-movflags', '+faststart', // optimize for streaming
+    // Fragmented MP4 — required for MSE playback in the Darkreel SPA viewer.
+    // Matches the flags darkreel-cli and the in-browser mp4box remux produce.
+    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
     outputPath,
   ];
 
