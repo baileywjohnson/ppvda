@@ -138,7 +138,16 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
   if (!statRes.isFile()) throw new Error('upload source is not a regular file');
   const fileSize = statRes.size;
   if (fileSize === 0) throw new Error('file is empty');
-  const chunkCount = Math.max(1, Math.ceil(fileSize / CHUNK_SIZE));
+
+  // For videos, align chunk boundaries to fMP4 segments (init then each
+  // moof+mdat pair). Darkreel's SPA MSE player treats chunk 0 as the init
+  // segment and assumes each subsequent chunk is a complete media segment —
+  // fixed-size splitting breaks that contract and stalls playback after the
+  // first segment. Mirrors darkreel-cli's scanFMP4Segments.
+  const segments = mediaType === 'video'
+    ? await scanFMP4Segments(filePath, fileSize)
+    : makeFixedSegments(fileSize);
+  const chunkCount = segments.length;
   if (chunkCount > 50000) throw new Error(`file too large: ${chunkCount} chunks exceeds server limit`);
 
   // Three per-file random symmetric keys. Never master-key-derived — always
@@ -211,8 +220,9 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
     const fd = await open(filePath, 'r');
     try {
       for (let i = 0; i < chunkCount; i++) {
-        const buf = Buffer.alloc(Math.min(CHUNK_SIZE, fileSize - i * CHUNK_SIZE));
-        const { bytesRead } = await fd.read(buf, 0, buf.length, i * CHUNK_SIZE);
+        const seg = segments[i];
+        const buf = Buffer.alloc(seg.size);
+        const { bytesRead } = await fd.read(buf, 0, buf.length, seg.offset);
         if (bytesRead !== buf.length) throw new Error(`short read at chunk ${i}`);
         const enc = encryptChunk(buf, fileKey, i, mediaIDBytes);
         form.set(`chunk${i}`, new Blob([bufferToU8(enc)], { type: 'application/octet-stream' }), `${i}.enc`);
@@ -280,4 +290,60 @@ export type { MediaType };
 function bufferToU8(buf: Buffer): Uint8Array<ArrayBuffer> {
   const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
   return new Uint8Array(ab);
+}
+
+interface Segment { offset: number; size: number; }
+
+function makeFixedSegments(fileSize: number): Segment[] {
+  const out: Segment[] = [];
+  for (let off = 0; off < fileSize; off += CHUNK_SIZE) {
+    out.push({ offset: off, size: Math.min(CHUNK_SIZE, fileSize - off) });
+  }
+  return out.length === 0 ? [{ offset: 0, size: 0 }] : out;
+}
+
+// Scan an fMP4 file for `moof` box offsets and return:
+//   segment 0    = everything before the first moof (ftyp + moov init segment)
+//   segment N≥1  = bytes [moof_N, moof_{N+1}) — i.e. one moof + following mdat
+// Falls back to a single whole-file segment if no moof is found (i.e. the
+// remux produced a non-fragmented MP4 — shouldn't happen with our ffmpeg
+// flags but handled defensively so a malformed input doesn't break upload).
+async function scanFMP4Segments(filePath: string, fileSize: number): Promise<Segment[]> {
+  const fd = await open(filePath, 'r');
+  try {
+    const header = Buffer.alloc(16);
+    const moofOffsets: number[] = [];
+    let pos = 0;
+    while (pos < fileSize) {
+      const readLen = Math.min(16, fileSize - pos);
+      if (readLen < 8) break;
+      const { bytesRead } = await fd.read(header, 0, readLen, pos);
+      if (bytesRead < 8) break;
+      let boxSize = header.readUInt32BE(0);
+      const boxType = header.slice(4, 8).toString('ascii');
+      if (boxSize === 1) {
+        if (bytesRead < 16) break;
+        // 64-bit extended size — JS numbers are safe up to 2^53, fMP4 files
+        // never approach that so a plain Number is fine.
+        const hi = header.readUInt32BE(8);
+        const lo = header.readUInt32BE(12);
+        boxSize = hi * 0x100000000 + lo;
+      } else if (boxSize === 0) {
+        boxSize = fileSize - pos;
+      }
+      if (boxSize < 8 || pos + boxSize > fileSize) break;
+      if (boxType === 'moof') moofOffsets.push(pos);
+      pos += boxSize;
+    }
+    if (moofOffsets.length === 0) return [{ offset: 0, size: fileSize }];
+    const segments: Segment[] = [{ offset: 0, size: moofOffsets[0] }];
+    for (let i = 0; i < moofOffsets.length; i++) {
+      const start = moofOffsets[i];
+      const end = i + 1 < moofOffsets.length ? moofOffsets[i + 1] : fileSize;
+      segments.push({ offset: start, size: end - start });
+    }
+    return segments;
+  } finally {
+    await fd.close();
+  }
 }
