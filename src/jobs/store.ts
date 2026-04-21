@@ -1,7 +1,7 @@
 import type { Job, JobEvent, JobResponse } from './types.js';
 import { generateId } from '../utils/id.js';
 
-const JOB_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+const JOB_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
 const SWEEP_INTERVAL_MS = 60 * 1000; // check every minute
 
 /** Coarsen timestamps to the current minute to reduce correlation precision. */
