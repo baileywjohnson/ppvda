@@ -257,6 +257,103 @@
     }
   });
 
+  // --- Form hint validation (Darkreel parity) ---
+  // Live-updates password/username requirement hints: red spans turn green as
+  // each constraint is met, and the hint hides once everything passes. The
+  // confirm input + submit button stay disabled until the password is valid.
+  function passwordChecks(pw) {
+    return {
+      length: pw.length >= 16,
+      letter: /[a-zA-Z]/.test(pw),
+      number: /\d/.test(pw),
+      symbol: /[^a-zA-Z0-9]/.test(pw),
+    };
+  }
+  function usernameChecks(u) {
+    return { ulen: u.length >= 3, umax: u.length <= 64 };
+  }
+  function allMet(checks) { return Object.values(checks).every(Boolean); }
+
+  function wireReqsHint(input, reqsEl, computeChecks) {
+    if (!input || !reqsEl) return () => true;
+    const apply = () => {
+      const checks = computeChecks(input.value);
+      for (const [key, met] of Object.entries(checks)) {
+        const span = reqsEl.querySelector(`[data-req="${key}"]`);
+        if (span) span.classList.toggle('met', met);
+      }
+      const met = allMet(checks);
+      if (met) {
+        reqsEl.classList.add('hidden');
+      } else if (document.activeElement === input) {
+        reqsEl.classList.remove('hidden');
+      }
+      return met;
+    };
+    input.addEventListener('input', apply);
+    input.addEventListener('focus', () => {
+      if (!allMet(computeChecks(input.value))) reqsEl.classList.remove('hidden');
+    });
+    input.addEventListener('blur', () => {
+      if (allMet(computeChecks(input.value))) reqsEl.classList.add('hidden');
+    });
+    return () => allMet(computeChecks(input.value));
+  }
+
+  function wireConfirmHint(pwInput, confirmInput, hintEl) {
+    if (!pwInput || !confirmInput || !hintEl) return () => true;
+    const matches = () => pwInput.value === confirmInput.value && confirmInput.value.length > 0;
+    const apply = () => {
+      if (matches()) {
+        hintEl.classList.add('hidden');
+      } else if (document.activeElement === confirmInput) {
+        hintEl.classList.remove('hidden');
+      }
+    };
+    pwInput.addEventListener('input', apply);
+    confirmInput.addEventListener('input', apply);
+    confirmInput.addEventListener('focus', () => { if (!matches()) hintEl.classList.remove('hidden'); });
+    confirmInput.addEventListener('blur', () => { if (matches()) hintEl.classList.add('hidden'); });
+    return matches;
+  }
+
+  // Disables the confirm-password input + submit button until the password
+  // reqs pass, then re-enables and lets the confirm-match drive submit state.
+  function wireFormGating(form, pwInput, confirmInput, pwReqsEl, confirmHintEl, usernameInput, usernameReqsEl) {
+    if (!form || !pwInput) return;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    const pwOk = wireReqsHint(pwInput, pwReqsEl, passwordChecks);
+    const nameOk = usernameInput ? wireReqsHint(usernameInput, usernameReqsEl, usernameChecks) : () => true;
+    const matchOk = confirmInput ? wireConfirmHint(pwInput, confirmInput, confirmHintEl) : () => true;
+    const update = () => {
+      const passwordValid = pwOk();
+      if (confirmInput) {
+        confirmInput.disabled = !passwordValid;
+        if (!passwordValid && confirmInput.value) {
+          confirmInput.value = '';
+          if (confirmHintEl) confirmHintEl.classList.add('hidden');
+        }
+      }
+      if (submitBtn) submitBtn.disabled = !(passwordValid && matchOk() && nameOk());
+    };
+    pwInput.addEventListener('input', update);
+    if (confirmInput) confirmInput.addEventListener('input', update);
+    if (usernameInput) usernameInput.addEventListener('input', update);
+    update();
+  }
+
+  wireFormGating(
+    registerForm,
+    $('#reg-password'), $('#reg-password-confirm'),
+    $('#reg-password-reqs'), $('#reg-confirm-hint'),
+    $('#reg-username'), $('#reg-username-reqs'),
+  );
+  wireFormGating(
+    recoverForm,
+    $('#rec-password'), $('#rec-password-confirm'),
+    $('#rec-password-reqs'), $('#rec-confirm-hint'),
+  );
+
   // --- Logout ---
   logoutBtn.addEventListener('click', async () => {
     await fetch('/auth/logout', { method: 'POST' }).catch(() => {});
@@ -903,6 +1000,11 @@
   });
 
   // Change password form
+  wireFormGating(
+    $('#password-form'),
+    $('#new-password'), $('#confirm-new-password'),
+    $('#pw-password-reqs'), $('#pw-confirm-hint'),
+  );
   $('#password-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const status = $('#pw-status');
@@ -1097,6 +1199,12 @@
   });
 
   // Create user form
+  wireFormGating(
+    $('#create-user-form'),
+    $('#new-user-pass'), null,
+    $('#new-user-pass-reqs'), null,
+    $('#new-user-name'), $('#new-user-name-reqs'),
+  );
   $('#create-user-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const status = $('#create-user-status');
