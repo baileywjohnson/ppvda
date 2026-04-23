@@ -307,9 +307,6 @@ else
 fi
 cd "$REPO_DIR"
 
-# darkreel-cli is downloaded automatically during Docker build
-# from GitHub releases (latest version)
-
 # --- Create directories ---
 mkdir -p data downloads mullvad
 
@@ -346,8 +343,7 @@ LOG_LEVEL=info
 # FFmpeg
 FFMPEG_PATH=ffmpeg
 
-# Darkreel CLI
-DRK_BINARY_PATH=/usr/local/bin/darkreel-cli
+# Darkreel uploads (in-process sealed-box client, no external binary)
 DRK_UPLOAD_TIMEOUT_MS=600000
 
 # Features

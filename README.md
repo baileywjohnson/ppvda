@@ -51,11 +51,12 @@
 ```
 Browser --> PPVDA (extract + download) --> Darkreel (encrypted storage + streaming)
               |                                |
-   headless Chromium                     darkreel-cli encrypts
-   via Mullvad VPN/proxy                 before upload
+   headless Chromium                     in-process client seals
+   via Mullvad VPN/proxy                 per-file keys to user's
+                                         X25519 public key
 ```
 
-Typical setup: PPVDA runs on a privacy-friendly VPS behind a VPN. Darkreel runs wherever you want fast streaming (e.g., a US or EU VPS). The two servers don't need to be co-located — darkreel-cli handles the encrypted upload over HTTPS.
+Typical setup: PPVDA runs on a privacy-friendly VPS behind a VPN. Darkreel runs wherever you want fast streaming (e.g., a US or EU VPS). The two servers don't need to be co-located — PPVDA's native Darkreel client speaks the schema v2 sealed-box protocol directly, so no external CLI binary is needed.
 
 ### Extraction pipeline
 
@@ -80,8 +81,10 @@ Browser downloads use fragmented MP4 (`frag_keyframe+empty_moov`) piped through 
 ### Job pipeline
 
 ```
-submit → extract (optional) → download → encrypt (darkreel-cli) → upload → secure delete
+submit → extract (optional) → download → remux to fMP4 (videos) → seal + encrypt + upload → secure delete
 ```
+
+For direct-MP4 downloads (plain file URLs, not HLS/DASH), PPVDA runs ffmpeg with `-movflags frag_keyframe+empty_moov+default_base_moof` before upload so Darkreel's MSE player can stream them — without fragmentation, the file uploads as a single chunk and playback stalls after the init segment. Pre-fragmented output from the HLS/DASH path skips the extra remux.
 
 Jobs run with a configurable concurrency semaphore. Each stage updates the job store, which emits events to connected clients. Terminal jobs have sensitive metadata (file path, size, format) cleared from memory.
 
@@ -116,7 +119,7 @@ Takes about 5 minutes. When it's done you'll see:
 | **Brute-force protection** | fail2ban auto-bans repeated SSH failures |
 | **SSH hardening** | Optional personal user with sudo, root login disabled |
 | **Docker** | Docker + Compose installed and enabled |
-| **Application** | PPVDA container with Chromium, ffmpeg, WireGuard, darkreel-cli |
+| **Application** | PPVDA container with Chromium, ffmpeg, WireGuard |
 | **Reverse proxy** | Caddy with automatic Let's Encrypt TLS (if domain provided) |
 | **Access log privacy** | Optional: Caddy access logs discarded (no IP/URL logging) |
 | **VPN** | Mullvad WireGuard tunnel (if account provided) |
@@ -262,18 +265,18 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
 - **Timing-safe authentication** — Dummy Argon2id derivation performed for non-existent usernames, legacy scrypt users whose login fails, and duplicate-username registration attempts, preventing timing-based username enumeration across all entry points
 - **Per-username rate limiting** — 10 login/recovery attempts per username per 15 minutes, defending against distributed brute-force even when per-IP limits are bypassed
 - **Session isolation** — Sessions indexed by random session ID (not user ID), with session ID embedded in JWT. Password changes and recovery invalidate all existing sessions
-- **SSRF protection** — All URLs validated against private IP ranges, IPv6 loopback/link-local/unique-local, and IPv4-mapped IPv6 addresses. DNS resolution checked twice with a 500ms delay to detect rebinding attacks. DNS failures rejected (fail-closed). HTTP redirect targets re-validated. Extracted video URLs re-validated before download
+- **SSRF protection** — All URLs validated against private IP ranges, IPv6 loopback/link-local/unique-local, IPv4-mapped IPv6 addresses, and obfuscated IPv4 encodings (decimal `http://2130706433/`, hex `http://0x7f.0.0.1/`, leading-zero octal `http://0177.0.0.1/`). DNS resolution checked twice with a 500ms delay to detect rebinding. DNS failures rejected (fail-closed). HTTP redirect targets re-validated. Extracted video URLs re-validated before download. Admin-facing errors from Darkreel's delegation-exchange endpoint have their upstream response body stripped before surfacing, so an admin intentionally targeting a private URL (same-LAN Darkreel) can't be turned into an SSRF response-body leak
 - **No shell injection** — All subprocesses (ffmpeg, ffprobe) spawned with argument arrays, never through a shell. No Darkreel password ever passes through a subprocess environment — the Darkreel client is in-process Node
 - **Admin re-verification** — Admin status verified from the database on every privileged request. Revoking admin access takes effect immediately
 - **Rate limiting** — 100 requests/min globally, 5/min on login/register/recover endpoints
-- **Cookie security** — httpOnly, SameSite=strict, Secure in production. No tokens in localStorage or query parameters
+- **Cookie security** — httpOnly, SameSite=strict, and Secure whenever the deployment URL (`PUBLIC_URL`) is HTTPS (falls back to `NODE_ENV === 'production'` for proxy-rewrite setups without `PUBLIC_URL`). No tokens in localStorage or query parameters
 - **Minimal subprocess environment** — ffmpeg receives only PATH, HOME, and TMPDIR. Secrets like JWT_SECRET and MULLVAD_ACCOUNT are not leaked
 - **Security headers** — CSP, HSTS, Permissions-Policy, X-Frame-Options, X-Content-Type-Options, Referrer-Policy on all responses
 - **VPN bypass validation** — Hostnames and IPs in `VPN_BYPASS_HOSTS` validated before writing to system routes and `/etc/hosts`
 - **No request logging** — URLs never appear in server logs. Rate limiting and session state are in-memory only and cleared on restart
 - **Coarsened timestamps** — Database timestamps use year-week precision (`strftime('%Y-%W')`) matching Darkreel's approach. In-memory job timestamps rounded to the minute
-- **Secure file deletion** — Downloaded media files overwritten with random data and fsynced before unlinking
-- **WAL hygiene** — SQLite WAL files checkpointed and truncated every 5 minutes and on shutdown, preventing forensic recovery of past transactions
+- **Secure file deletion** — Downloaded media files overwritten with random data and fsynced before unlinking. **Caveat:** this is a defense-in-depth pass, not a forensic guarantee on modern filesystems — CoW (Btrfs/ZFS/APFS) and SSD wear-levelling mean the overwrite may not reach the original blocks. See [SECURITY.md](./SECURITY.md) for the recommended tmpfs-backed `TEMP_DIR` + full-disk-encryption posture
+- **WAL hygiene** — SQLite WAL files checkpointed and truncated every 5 minutes and on shutdown; `PRAGMA secure_delete = ON` zeroes deleted row contents before the page is reused, so revoked Darkreel delegations and expired sessions don't linger in page slack
 - **DNS privacy** — When Mullvad VPN is active, DNS queries route through the WireGuard tunnel
 - **Memory security** — Master keys, derived keys, and passwords zeroed from memory immediately after use. Session cleanup runs every 60 seconds
 - **Bootstrap credential cleanup** — Admin password stored in a separate bootstrap file during setup, shredded after the first health check. Never persists in `.env`. If the admin recovery code file (`admin-recovery-code.txt`) is not deleted manually after first run, the server logs a WARN on every startup reminding the operator to remove it
@@ -281,6 +284,8 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
 - **Protocol restriction** — ffmpeg and ffprobe inputs restricted to http/https protocols, blocking `file://`, `gopher://`, `concat:`, etc.
 - **Legacy migration** — Users created with older scrypt/PBKDF2 auth are transparently upgraded to Argon2id + AAD on next login
 - **SRI integrity** — Frontend JS and CSS loaded with subresource integrity hashes
+- **JWT secret entropy** — `JWT_SECRET` is validated at startup for length AND Shannon entropy, so placeholder values like `"a" * 32` are rejected instead of silently enabling trivially-forgeable tokens
+- **Per-session master-key binding** — Write paths that wrap data under the user's master key (Darkreel delegation connect) look up the key by the request's `sessionId`, not by user ID. Under multi-session churn, any-session lookup could wrap new data under an about-to-expire session's key, silently rendering it undecryptable after timeout
 
 ### VPN privacy
 
@@ -420,7 +425,7 @@ All configuration is via environment variables (or `.env` file).
 |----------|---------|-------------|
 | `PPVDA_ADMIN_USERNAME` | `admin` | Admin username (first-run only) |
 | `PPVDA_ADMIN_PASSWORD` | **(required)** | Admin password (first-run only) |
-| `JWT_SECRET` | random (dev), **required** (prod) | JWT signing secret. Required when `NODE_ENV=production`. Set to a random 32+ character string for persistent sessions across restarts. |
+| `JWT_SECRET` | **(required)** | JWT signing secret. Must be 32+ characters *and* pass a Shannon-entropy check — `"a" * 32` is rejected. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Keep it stable across restarts or all existing sessions become invalid. |
 | `DB_PATH` | `./data/ppvda.db` | SQLite database path |
 
 ### Darkreel uploads

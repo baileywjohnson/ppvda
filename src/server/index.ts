@@ -75,6 +75,7 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
     db,
     sessions,
     jwtSecret: config.jwtSecret,
+    publicUrl: config.publicUrl,
   });
 
   // Serve static web UI

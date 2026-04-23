@@ -5,8 +5,6 @@ services:
       - "3000:3000"
     env_file:
       - .env
-    environment:
-      - DRK_BINARY_PATH=/usr/local/bin/darkreel-cli
     volumes:
       - ./downloads:/app/downloads
       - ./data:/app/data

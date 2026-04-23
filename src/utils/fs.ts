@@ -23,8 +23,23 @@ export async function fileSize(path: string): Promise<number> {
 const OVERWRITE_CHUNK = 64 * 1024; // 64 KB
 
 /**
- * Securely delete a file by overwriting its contents with random data before
- * unlinking. Prevents forensic recovery of media content from disk.
+ * Overwrite a file with random bytes, datasync, then unlink. Best-effort
+ * "secure" delete for downloaded plaintext before it leaves the disk.
+ *
+ * Caveat — this is NOT forensically sufficient on modern filesystems:
+ *
+ *   - Copy-on-write FS (Btrfs, ZFS, APFS, XFS with reflinks) allocate a
+ *     new block for the overwrite; the original blocks keep the plaintext
+ *     until the FS garbage-collects. The overwrite pass is a no-op.
+ *   - SSDs / NVMe wear-levelling scatter writes; the "original" LBA may
+ *     map to entirely different flash pages than the overwrite.
+ *   - Journald / any log-structured FS retains historical page contents.
+ *
+ * See SECURITY.md ("Temp-file plaintext at rest") for the recommended
+ * deployment setup — tmpfs for TEMP_DIR plus full-disk encryption is the
+ * posture that actually delivers the property users might read into the
+ * function name. On ext4 over a LUKS-encrypted rotational disk, this
+ * overwrite is meaningful; elsewhere it's a defence-in-depth speed bump.
  */
 export async function secureUnlink(filePath: string): Promise<void> {
   try {

@@ -6,19 +6,18 @@ PPVDA is a privacy-focused video extractor/downloader. It runs a headless Chromi
 
 ### In scope
 
-- **SSRF defense**: user-supplied URLs cannot target RFC1918, loopback, link-local, cloud-metadata, or IPv6 private ranges. DNS rebinding is detected via double-resolution at the route level and blocked at the browser level via Chromium `--host-rules`.
-- **Credential confidentiality**: users' Darkreel passwords are encrypted at rest with each user's master key (AES-256-GCM, AAD bound to user ID). They are never logged.
-- **Authentication integrity**: Argon2id password hashing, timing-safe comparisons, dummy-hash-on-miss to prevent username enumeration, per-username rate limiting (10/15 min), `httpOnly` + `SameSite=strict` session cookies, JWT HS256 with a required `JWT_SECRET`.
-- **Subprocess isolation**: `ffmpeg`, `darkreel-cli`, and WireGuard are spawned via argv arrays with explicit env — no shell, no inheritance of parent secrets beyond what each needs.
+- **SSRF defense**: user-supplied URLs cannot target RFC1918, loopback, link-local, cloud-metadata, or IPv6 private ranges, *including* obfuscated IPv4 encodings (decimal `http://2130706433/`, hex `http://0x7f.0.0.1/`, leading-zero octal). DNS rebinding is detected via double-resolution at the route level and blocked at the browser level via Chromium `--host-rules`.
+- **Credential confidentiality**: PPVDA no longer holds any Darkreel password. Connect runs a delegation exchange (copy-paste authorization code) that returns a scoped refresh token + the user's Darkreel X25519 public key; PPVDA stores only those two, with the refresh token AES-256-GCM-encrypted at rest under the user's PPVDA master key (AAD = user ID). A full PPVDA compromise grants *upload-only* capability to each connected Darkreel account — not read, list, or delete.
+- **Authentication integrity**: Argon2id password hashing, timing-safe comparisons, dummy-hash-on-miss to prevent username enumeration, per-username rate limiting (10/15 min), `httpOnly` + `SameSite=strict` + `Secure` session cookies (Secure is gated on `PUBLIC_URL` being HTTPS, falling back to `NODE_ENV === 'production'`), JWT HS256 with a required `JWT_SECRET` that's length-AND-entropy-checked at startup.
+- **Subprocess isolation**: `ffmpeg`, `ffprobe`, and WireGuard are spawned via argv arrays with explicit env — no shell, no inheritance of parent secrets beyond what each needs. Darkreel uploads run in-process (sealed-box crypto via Node's Web Crypto); there is no subprocess to leak environment variables.
 - **No persistent PII**: URLs are not logged, downloads are streamed to the client without intermediate storage, and no download history is retained.
 
 ### Out of scope
 
 - **Browser-level zero-days in the bundled Chromium**. Playwright ships a pinned Chromium version; a zero-day against it is exploitable against any user-supplied page. See the `CVE tracking` section below for the live list. **PPVDA navigates arbitrary URLs, so this is a real and ongoing risk.**
 - **Compromise of the VPN layer itself** (e.g., Mullvad egress bugs, WireGuard cryptographic failures). Application-level kill-switch (see below) guards against tunnel failure but not against a successfully established tunnel that is itself compromised.
-- **Compromise of the Darkreel server**. PPVDA trusts the configured Darkreel server for upload confidentiality. End-to-end encryption is handled by `darkreel-cli`, so a compromised Darkreel server sees encrypted blobs only — but a hostile server can still DoS the CLI via crafted responses (bounded, see `darkreel-cli` SECURITY.md).
+- **Compromise of the Darkreel server**. PPVDA uploads go out sealed to the user's X25519 public key, so a compromised Darkreel server sees ciphertext and opaque sealed keys only. A hostile server could still refuse uploads, return tampered media to other browsers, or mint bogus pagination responses — PPVDA bounds response sizes to make the latter a bandwidth nuisance rather than memory exhaustion.
 - **Local attackers with shell access to the PPVDA host**. SQLite is unencrypted at rest; user Argon2 hashes are on disk. Pair with LUKS / FileVault / SQLCipher if backup theft is in your threat model.
-- **Same-UID attackers reading `/proc/<pid>/environ`** of the `darkreel-cli` subprocess during upload, which contains the user's decrypted Darkreel password.
 
 ## Deployment requirements
 
@@ -49,6 +48,23 @@ Playwright ships a pinned Chromium. When a Chromium CVE affects navigation (part
 SQLite at `./data/ppvda.db` is unencrypted by default. It contains Argon2 hashes, encrypted Darkreel credentials (per-user-key, AES-256-GCM), and session metadata. If backup theft is part of your threat model, either:
 - deploy on a LUKS / FileVault / encrypted-EBS host, or
 - swap `better-sqlite3` for `better-sqlite3-multiple-ciphers` and configure a cipher key passed via a secret manager.
+
+`secure_delete = ON` is enabled, so deleted rows (including revoked delegations and expired sessions) are zeroed before the page is reused — not just marked free in the btree.
+
+### Temp-file plaintext at rest
+
+Downloaded video files live briefly in `DOWNLOAD_DIR` (default `./downloads/`) as plaintext before being encrypted and shipped to Darkreel (or deleted if no delegation is configured). `secureUnlink` overwrites each file with random bytes and datasyncs before unlinking, but on modern filesystems this overwrite **does not reliably reach the original blocks**:
+
+- **Copy-on-write filesystems** (Btrfs, ZFS, APFS, XFS reflinks): an overwrite allocates a new block; the original blocks keep the plaintext until the FS garbage-collects them.
+- **SSDs / NVMe**: wear-levelling scatters writes across flash pages — the "same LBA" may map to completely different physical pages before vs after the overwrite. The plaintext page is still flagged as garbage in the FTL but not erased until the next TRIM + block erase.
+- **Log-structured / journaling filesystems** retain historical page contents in the journal.
+
+To actually get forensic resistance on the temp-file surface, you need **full-disk encryption plus an ephemeral tmpfs**:
+
+1. Run the host/container on LUKS / FileVault / encrypted EBS (also covers the SQLite DB — see above).
+2. Set `TEMP_DIR=/dev/shm/ppvda-tmp` (or a tmpfs bind-mount in the Docker compose), which backs the download directory with RAM. Files never touch disk at all; on reboot everything is gone regardless of the overwrite pass.
+
+Without FDE, treat `secureUnlink` as a defence-in-depth speed bump against naïve disk recovery, not a forensic guarantee. The function is useful on ext4/xfs over a LUKS-encrypted rotational disk; on most other deployments its security contribution is marginal.
 
 ## Reporting a vulnerability
 

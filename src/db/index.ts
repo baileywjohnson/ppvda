@@ -45,6 +45,12 @@ export class DB {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
+    // Zero the content of deleted rows before the page is reused. Without
+    // this, user deletions leave the plaintext row bytes (encrypted master
+    // keys, encrypted Darkreel refresh tokens, session metadata) recoverable
+    // from slack until SQLite happens to overwrite the page. Cost is a
+    // memset per deleted row — imperceptible on PPVDA's workload.
+    this.db.pragma('secure_delete = ON');
     this.migrate();
 
     // Checkpoint WAL periodically to prevent transaction history accumulation.

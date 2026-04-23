@@ -70,6 +70,12 @@ interface AuthOpts {
   db: DB;
   sessions: SessionStore;
   jwtSecret: string;
+  // When set and https://, cookies are issued with Secure=true unconditionally.
+  // Previously gated on NODE_ENV === 'production', which broke if the env var
+  // was unset/misset — a cookie issued without Secure over an HTTPS publicUrl
+  // would leak to any plaintext detour (rogue AP, transparent proxy). Using
+  // the deployment URL's scheme as the source of truth is unambiguous.
+  publicUrl?: string;
 }
 
 export interface UserContext {
@@ -89,6 +95,11 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
   const { db, sessions } = opts;
   const secret = new TextEncoder().encode(opts.jwtSecret);
   const accountLimiter = new AccountLimiter();
+  // Force Secure=true whenever the deployment is served over HTTPS. Falls
+  // back to NODE_ENV for operators who run without publicUrl in production
+  // (behind a proxy that rewrites), so behavior never regresses.
+  const secureCookie = opts.publicUrl?.startsWith('https://') === true
+    || process.env.NODE_ENV === 'production';
 
   await app.register(fastifyCookie);
 
@@ -190,7 +201,7 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
       path: '/',
       httpOnly: true,
       sameSite: 'strict',
-      secure: process.env.NODE_ENV === 'production',
+      secure: secureCookie,
     });
   }
 
