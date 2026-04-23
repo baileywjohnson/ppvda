@@ -15,6 +15,13 @@ export async function isPrivateUrl(url: string): Promise<boolean> {
     // Block obviously private hostnames
     if (isPrivateHostname(hostname)) return true;
 
+    // Reject obfuscated IPv4 encodings outright. Node's URL parser accepts
+    // decimal (http://2130706433/), hex (http://0x7f.0.0.1/), and
+    // leading-zero octal (http://0177.0.0.1/) forms that skip our
+    // isPrivateIP dotted-decimal regexes. getaddrinfo usually normalizes
+    // these but the behavior is libc-dependent — reject at the source.
+    if (isObfuscatedIPv4(hostname)) return true;
+
     // Resolve DNS and check the resulting IP (retry once on transient failure)
     let firstAddress: string;
     try {
@@ -50,6 +57,28 @@ export async function isPrivateUrl(url: string): Promise<boolean> {
   } catch {
     return true; // Malformed URL — treat as private
   }
+}
+
+// Match any hostname that's an IPv4 address in a non-dotted-decimal form, OR
+// a dotted form containing any hex/octal components. Plain dotted-decimal is
+// left alone so isPrivateIP's regexes get their usual shot at it.
+function isObfuscatedIPv4(hostname: string): boolean {
+  // Strip brackets from bare IPv6 literals; we only care about IPv4 here.
+  if (hostname.startsWith('[') && hostname.endsWith(']')) return false;
+  // Pure decimal integer host (e.g. "2130706433" = 127.0.0.1).
+  if (/^\d+$/.test(hostname) && hostname.length > 0) return true;
+  // Dotted form with 1-4 components. Reject any component that's hex-prefixed
+  // (0x…) or has a leading zero with length > 1 (octal form).
+  const parts = hostname.split('.');
+  if (parts.length >= 1 && parts.length <= 4 && parts.every((p) => p.length > 0)) {
+    const looksLikeIP = parts.every((p) => /^(0x[0-9a-f]+|\d+)$/i.test(p));
+    if (!looksLikeIP) return false;
+    for (const p of parts) {
+      if (/^0x/i.test(p)) return true;
+      if (p.length > 1 && p.startsWith('0')) return true;
+    }
+  }
+  return false;
 }
 
 function isPrivateHostname(hostname: string): boolean {
@@ -99,6 +128,7 @@ export async function isConfirmedPrivateUrl(url: string): Promise<boolean> {
     const hostname = parsed.hostname;
 
     if (isPrivateHostname(hostname)) return true;
+    if (isObfuscatedIPv4(hostname)) return true;
 
     try {
       const result = await lookup(hostname);

@@ -14,6 +14,12 @@ export interface LocalProbeResult {
   width?: number;
   height?: number;
   duration?: number;
+  // Comma-separated MSE codec string (e.g. "avc1.640028,mp4a.40.2"). Darkreel's
+  // SPA passes this to MediaSource.addSourceBuffer — if it's absent or wrong,
+  // the SPA falls back to a hardcoded "avc1.64001f,mp4a.40.2" default, and MSE
+  // rejects the init segment with OperationError for any video encoded at a
+  // different profile/level or with a different audio codec.
+  codecs?: string;
 }
 
 const PROBE_TIMEOUT_MS = 5000;
@@ -69,16 +75,30 @@ export async function probeLocalFile(
       }
       try {
         const data = JSON.parse(out) as {
-          streams?: Array<{ codec_type?: string; width?: number; height?: number }>;
+          streams?: Array<{
+            codec_type?: string;
+            codec_name?: string;
+            profile?: string;
+            level?: number;
+            width?: number;
+            height?: number;
+          }>;
           format?: { duration?: string };
         };
         const video = data.streams?.find((s) => s.codec_type === 'video');
+        const audio = data.streams?.find((s) => s.codec_type === 'audio');
         const durationStr = data.format?.duration;
         const duration = durationStr ? parseFloat(durationStr) : undefined;
+        const codecParts: string[] = [];
+        const vCodec = video && buildCodecString(video);
+        if (vCodec) codecParts.push(vCodec);
+        const aCodec = audio && buildCodecString(audio);
+        if (aCodec) codecParts.push(aCodec);
         resolve({
           width: video?.width,
           height: video?.height,
           duration: duration !== undefined && !Number.isNaN(duration) && duration > 0 ? duration : undefined,
+          codecs: codecParts.length > 0 ? codecParts.join(',') : undefined,
         });
       } catch {
         resolve({});
@@ -90,6 +110,61 @@ export async function probeLocalFile(
       resolve({});
     });
   });
+}
+
+// Build an MSE-compatible codec string from ffprobe stream fields. Profile
+// names come from ffmpeg's libavcodec; the mappings below cover the common
+// real-world encodes seen in web video. The string format is what appears in
+// MediaSource `video/mp4; codecs="..."` type assertions.
+//
+// For H.264 we use constraint_set_flags = 0x00 which is the most-permissive
+// default — real files sometimes encode flags like 0x40 (no-B-frames) but
+// browsers typically match on profile+level and ignore the constraint byte.
+// For HEVC/AV1/VP9 we fall back to conservative safe strings; exact matches
+// would require parsing the stsd box from the mp4 directly.
+function buildCodecString(stream: {
+  codec_name?: string;
+  profile?: string;
+  level?: number;
+}): string | undefined {
+  const name = stream.codec_name;
+  const profile = stream.profile;
+  const level = stream.level;
+  if (!name) return undefined;
+
+  if (name === 'h264') {
+    const profileMap: Record<string, number> = {
+      'Constrained Baseline': 0x42,
+      'Baseline': 0x42,
+      'Main': 0x4d,
+      'Extended': 0x58,
+      'High': 0x64,
+      'High 10': 0x6e,
+      'High 4:2:2': 0x7a,
+      'High 4:4:4 Predictive': 0xf4,
+    };
+    const pid = profileMap[profile ?? ''] ?? 0x64;
+    const lev = typeof level === 'number' && level > 0 ? level : 31;
+    return `avc1.${pid.toString(16).padStart(2, '0')}00${lev.toString(16).padStart(2, '0')}`;
+  }
+  if (name === 'hevc' || name === 'h265') {
+    return 'hvc1.1.6.L93.B0';
+  }
+  if (name === 'aac') {
+    const profileMap: Record<string, number> = {
+      'LC': 2,
+      'HE-AAC': 5,
+      'HE-AACv2': 29,
+      'Main': 1,
+    };
+    const obj = profileMap[profile ?? ''] ?? 2;
+    return `mp4a.40.${obj}`;
+  }
+  if (name === 'mp3') return 'mp4a.40.34';
+  if (name === 'opus') return 'opus';
+  if (name === 'vp9') return 'vp09.00.10.08';
+  if (name === 'av1') return 'av01.0.04M.08';
+  return undefined;
 }
 
 /**

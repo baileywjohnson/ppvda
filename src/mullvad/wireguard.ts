@@ -143,8 +143,19 @@ export async function addRouteExceptions(
   hosts: Array<{ hostname: string; ips: string[] }>,
   gateway: string,
 ): Promise<void> {
-  const { appendFile } = await import('node:fs/promises');
+  const { readFile, writeFile } = await import('node:fs/promises');
 
+  // Read existing /etc/hosts once so we can skip lines that already map the
+  // same ip→hostname pair. Plain appendFile-per-switch would grow /etc/hosts
+  // unboundedly across country changes (each switch re-adds every bypass).
+  let existing = '';
+  try {
+    existing = await readFile('/etc/hosts', 'utf-8');
+  } catch {
+    // Non-fatal — treat as empty if unreadable
+  }
+
+  const newEntries: string[] = [];
   for (const { hostname, ips } of hosts) {
     // Validate hostname to prevent /etc/hosts injection (no newlines, control chars, or spaces)
     if (!/^[a-zA-Z0-9._-]+$/.test(hostname)) continue;
@@ -160,12 +171,22 @@ export async function addRouteExceptions(
         // Route may already exist
       }
 
-      // Add /etc/hosts entry so hostname resolves after VPN DNS takes over
-      try {
-        await appendFile('/etc/hosts', `${ip} ${hostname}\n`);
-      } catch {
-        // Non-fatal
+      const entry = `${ip} ${hostname}`;
+      // Match a full line to avoid false positives from substring overlaps.
+      const lineRe = new RegExp(`^${entry.replace(/\./g, '\\.')}\\s*$`, 'm');
+      if (!lineRe.test(existing) && !newEntries.includes(entry)) {
+        newEntries.push(entry);
       }
+    }
+  }
+
+  if (newEntries.length > 0) {
+    try {
+      const sep = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+      await writeFile('/etc/hosts', existing + sep + newEntries.join('\n') + '\n');
+    } catch {
+      // Non-fatal — best-effort; a failure here just means hostname lookups
+      // go through VPN DNS instead of resolving locally.
     }
   }
 }

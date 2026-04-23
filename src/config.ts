@@ -18,7 +18,30 @@ function getJwtSecret(): string {
   if (secret.length < 32) {
     throw new Error('JWT_SECRET must be at least 32 characters');
   }
+  // Length alone is a weak check — "a" * 32 passes. Require reasonable entropy
+  // so operators who set placeholder secrets (repeated characters, sequential
+  // letters) get a loud startup failure instead of silently-forgeable tokens.
+  if (shannonEntropyBits(secret) < 3.0) {
+    throw new Error(
+      'JWT_SECRET is too low-entropy. Use a random string from:\n' +
+      '  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"',
+    );
+  }
   return secret;
+}
+
+// Shannon entropy in bits per character. Pure random base64/hex output is
+// 4-6 bits/char. "aaaaaaaa..." is 0. A threshold of 3.0 bits/char flags
+// placeholder strings while still accepting hex (4 bits/char) and base64.
+function shannonEntropyBits(s: string): number {
+  const counts = new Map<string, number>();
+  for (const ch of s) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  let h = 0;
+  for (const c of counts.values()) {
+    const p = c / s.length;
+    h -= p * Math.log2(p);
+  }
+  return h;
 }
 
 export interface AppConfig {

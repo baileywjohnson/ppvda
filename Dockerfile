@@ -37,11 +37,10 @@ RUN npm run build
 FROM base AS runtime
 WORKDIR /app
 
-# Download latest darkreel-cli from GitHub releases
-ARG TARGETARCH
-RUN curl -fsSL -o /usr/local/bin/darkreel-cli \
-    "https://github.com/baileywjohnson/darkreel-cli/releases/latest/download/darkreel-cli-linux-${TARGETARCH}" \
-    && chmod +x /usr/local/bin/darkreel-cli
+# Note: the darkreel-cli binary is no longer shipped — uploads go through the
+# in-process Shape-2 client in src/darkreel/client.ts. Removed both the unpinned
+# GitHub download (supply-chain risk: unverified latest-release fetch) and the
+# DRK_BINARY_PATH env var it exposed (dead-code attack surface).
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
@@ -66,7 +65,6 @@ ENV NODE_ENV=production
 ENV DOWNLOAD_DIR=/app/downloads
 ENV TEMP_DIR=/app/tmp
 ENV MULLVAD_CONFIG_DIR=/app/mullvad
-ENV DRK_BINARY_PATH=/usr/local/bin/darkreel-cli
 
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

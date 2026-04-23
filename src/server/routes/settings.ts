@@ -66,6 +66,7 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
     },
     async (request, reply) => {
       const userId = (request as any).user.sub;
+      const sessionId = (request as any).user.sid;
       const isAdmin = (request as any).user.isAdmin;
       const { server_url, authorization_code } = request.body;
 
@@ -111,13 +112,16 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
       }
 
       // Encrypt the refresh token under the user's PPVDA master key with
-      // userID as AAD. Without the master key (i.e., user logged out), the
-      // stored row is decrypt-proof even to someone holding the DB.
-      const masterKey = sessions.getKeyForUser(userId);
-      if (!masterKey) {
+      // userID as AAD. Bind to THIS request's session — using any-session
+      // lookup (getKeyForUser) could wrap the refresh token under an
+      // about-to-expire session's key, making the delegation undecryptable
+      // as soon as that session times out.
+      const session = sessions.get(sessionId);
+      if (!session || session.userId !== userId) {
         reply.status(401).send({ success: false, error: 'Session expired, please re-login' });
         return;
       }
+      const masterKey = session.key;
       try {
         const userIdBytes = Buffer.from(userId, 'utf-8');
         const { ciphertext, nonce } = encrypt(

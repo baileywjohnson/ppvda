@@ -1,10 +1,12 @@
 import { createCipheriv, randomBytes, randomUUID } from 'node:crypto';
-import { stat, open } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { stat, open, unlink } from 'node:fs/promises';
+import { basename, join, dirname } from 'node:path';
 import { encryptBlock } from '../crypto/index.js';
 import { seal } from './crypto.js';
 import { detectMediaType, generateThumbnail, type MediaType } from './thumbnail.js';
 import { probeLocalFile, padToBucket } from './probe.js';
+import { extractCodecsFromMP4 } from './mp4-codecs.js';
+import { remuxToFragmentedMP4 } from '../downloader/ffmpeg.js';
 
 // Native Darkreel client. Replaces the spawn(darkreel-cli) hook with pure
 // Node code that speaks the Phase 2 sealed-box upload protocol directly.
@@ -60,10 +62,13 @@ export async function exchangeCode(
     redirect: 'error', // refuse redirects — the server shouldn't send any
   });
   if (!res.ok) {
-    // Server returns identical text for "not found" vs "expired" so we pass
-    // the same message through. No leakage of distinguishers.
-    const text = await res.text().catch(() => '');
-    throw new Error(text || 'Authorization code exchange failed');
+    // Drain and discard the body. Reflecting the upstream response text
+    // into a thrown Error (and thus into the HTTP response surfaced to the
+    // admin who is allowed to target private URLs) would turn this into an
+    // SSRF primitive with body-leak — e.g. IMDS `/latest/meta-data/…` text.
+    // We only keep the status code.
+    await res.text().catch(() => '');
+    throw new Error(`Authorization code exchange failed (HTTP ${res.status})`);
   }
   const data = (await res.json()) as ExchangeResponse;
   const publicKey = Buffer.from(data.public_key, 'base64');
@@ -134,18 +139,56 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
   const fileName = basename(filePath);
   const mediaType = detectMediaType(fileName);
 
-  const statRes = await stat(filePath);
-  if (!statRes.isFile()) throw new Error('upload source is not a regular file');
-  const fileSize = statRes.size;
-  if (fileSize === 0) throw new Error('file is empty');
+  const initialStat = await stat(filePath);
+  if (!initialStat.isFile()) throw new Error('upload source is not a regular file');
+  if (initialStat.size === 0) throw new Error('file is empty');
 
-  // For videos, align chunk boundaries to fMP4 segments (init then each
-  // moof+mdat pair). Darkreel's SPA MSE player treats chunk 0 as the init
-  // segment and assumes each subsequent chunk is a complete media segment —
-  // fixed-size splitting breaks that contract and stalls playback after the
-  // first segment. Mirrors darkreel-cli's scanFMP4Segments.
-  const segments = mediaType === 'video'
-    ? await scanFMP4Segments(filePath, fileSize)
+  // For videos, Darkreel's SPA MSE player expects chunk 0 to be the init
+  // segment (everything before the first moof) and chunks 1..N to each be
+  // one moof+mdat pair. A non-fragmented MP4 (moov at end, one big mdat)
+  // has no moof boxes at all — scanFMP4Segments returns a single whole-
+  // file segment, the SPA appends it as "init", sees no media chunks to
+  // stream, and playback never starts. Direct-downloaded videos (plain
+  // MP4 URLs, not HLS/DASH) come through this path unchanged from the
+  // origin server, so they're typically non-fragmented.
+  //
+  // Remux to fMP4 up front if needed. We detect by scanning for moof — if
+  // zero moofs, the file needs remuxing. If remux fails (ffmpeg missing,
+  // unsupported codec, etc.) we fall back to uploading as non-fragmented,
+  // which the SPA handles via its blob-download playback path.
+  let uploadPath = filePath;
+  let fragmented = false;
+  let cleanupRemux: (() => Promise<void>) | null = null;
+  if (mediaType === 'video') {
+    const initialScan = await scanFMP4Segments(filePath, initialStat.size);
+    const alreadyFragmented = initialScan.length > 1; // init + ≥1 media segment
+    if (alreadyFragmented) {
+      fragmented = true;
+    } else {
+      const remuxPath = join(dirname(filePath), `.${basename(filePath)}.fmp4.${randomUUID()}`);
+      const result = await remuxToFragmentedMP4({
+        inputPath: filePath,
+        outputPath: remuxPath,
+        ffmpegPath,
+      });
+      if (result.success) {
+        uploadPath = remuxPath;
+        fragmented = true;
+        cleanupRemux = async () => { await unlink(remuxPath).catch(() => {}); };
+      } else {
+        // Remux unavailable — upload as-is so the file is at least saved.
+        // The SPA falls back to blob playback (download-then-play) for
+        // non-fragmented items.
+      }
+    }
+  }
+
+  try {
+  const statRes = await stat(uploadPath);
+  const fileSize = statRes.size;
+
+  const segments = fragmented
+    ? await scanFMP4Segments(uploadPath, fileSize)
     : makeFixedSegments(fileSize);
   const chunkCount = segments.length;
   if (chunkCount > 50000) throw new Error(`file too large: ${chunkCount} chunks exceeds server limit`);
@@ -159,7 +202,7 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
 
   try {
     // Thumbnail. Generate off-disk (ffmpeg for media, placeholder for file).
-    const thumbPlain = await generateThumbnail(filePath, mediaType, ffmpegPath);
+    const thumbPlain = await generateThumbnail(uploadPath, mediaType, ffmpegPath);
     const thumbEnc = encryptChunk(thumbPlain, thumbKey, 0, mediaIDBytes);
 
     // Metadata blob, encrypted under its own key (not the master key) so a
@@ -177,14 +220,29 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
       chunk_count: chunkCount,
     };
     if (mediaType === 'video' || mediaType === 'image') {
-      const info = await probeLocalFile(filePath, ffmpegPath);
+      const info = await probeLocalFile(uploadPath, ffmpegPath);
       if (info.width !== undefined) meta.width = info.width;
       if (info.height !== undefined) meta.height = info.height;
       if (info.duration !== undefined && mediaType === 'video') meta.duration = info.duration;
+      // Codec string preference: parse the actual avcC/hvcC/esds bytes from
+      // the produced fMP4 first — those give a bit-exact match for MSE (Safari
+      // and some Chrome paths strictly check all three bytes of avc1.PPCCLL).
+      // Fall back to the ffprobe-derived profile/level mapping only if the
+      // box walk fails. The ffprobe path always sets constraint_set_flags to
+      // 0x00 which mismatches many real-world encodes (e.g., 0x40 for
+      // "no B-frames") and is the root cause of MSE refusing to initialize
+      // the SourceBuffer for PPVDA uploads.
+      if (mediaType === 'video') {
+        const exact = await extractCodecsFromMP4(uploadPath);
+        if (exact) meta.codecs = exact;
+        else if (info.codecs !== undefined) meta.codecs = info.codecs;
+      }
     }
-    // Videos go out as fragmented MP4 (see downloader/ffmpeg.ts), so the SPA
-    // viewer can play them via MSE instead of downloading the whole file first.
-    if (mediaType === 'video') meta.fragmented = true;
+    // Only claim `fragmented: true` when the upload file actually is fMP4
+    // (either direct ffmpeg output or a successful post-download remux). If
+    // we set this flag on a non-fragmented file, the SPA's MSE path appends
+    // the whole file as "init" and playback never starts.
+    if (mediaType === 'video' && fragmented) meta.fragmented = true;
     // Pad to a power-of-2 bucket (min 512 B) before encryption. Matches the
     // darkreel-cli / Darkreel-browser scheme: JSON.parse ignores trailing
     // spaces, so the SPA decrypts without any unpadding logic. Bucket
@@ -217,7 +275,7 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
     }));
     form.set('thumbnail', new Blob([bufferToU8(thumbEnc)], { type: 'application/octet-stream' }), 'thumb.enc');
 
-    const fd = await open(filePath, 'r');
+    const fd = await open(uploadPath, 'r');
     try {
       for (let i = 0; i < chunkCount; i++) {
         const seg = segments[i];
@@ -247,6 +305,9 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
     fileKey.fill(0);
     thumbKey.fill(0);
     metadataKey.fill(0);
+  }
+  } finally {
+    if (cleanupRemux) await cleanupRemux();
   }
 }
 

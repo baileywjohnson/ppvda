@@ -19,6 +19,52 @@ export interface FfmpegResult {
 }
 
 /**
+ * Remux a local MP4/MOV/etc. to fragmented MP4 (moof/mdat segments with an
+ * empty-moov init). Required when the source is a plain direct download —
+ * non-fragmented files have no moof boxes, so Darkreel's segment scanner
+ * treats them as a single whole-file chunk, which MSE cannot stream.
+ *
+ * Uses `-c copy` so there's no re-encode — just container rewrite. Returns
+ * { success: false } without throwing so callers can fall back to uploading
+ * the original as non-fragmented.
+ */
+export async function remuxToFragmentedMP4(options: {
+  inputPath: string;
+  outputPath: string;
+  ffmpegPath: string;
+  timeoutMs?: number;
+}): Promise<{ success: boolean }> {
+  const { inputPath, outputPath, ffmpegPath, timeoutMs = 120000 } = options;
+  const args = [
+    '-y',
+    '-i', inputPath,
+    '-c', 'copy',
+    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+    outputPath,
+  ];
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? '',
+    HOME: process.env.HOME ?? '',
+    TMPDIR: process.env.TMPDIR ?? '',
+  };
+  return new Promise<{ success: boolean }>((resolve) => {
+    const proc = spawn(ffmpegPath, args, { env, stdio: ['ignore', 'ignore', 'ignore'] });
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL');
+      resolve({ success: false });
+    }, timeoutMs);
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ success: code === 0 });
+    });
+    proc.on('error', () => {
+      clearTimeout(timer);
+      resolve({ success: false });
+    });
+  });
+}
+
+/**
  * Run ffmpeg to download and remux a stream (HLS/DASH) to MP4.
  */
 export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
