@@ -5,7 +5,7 @@ import { pipeline } from 'node:stream/promises';
 import { DownloadError, TimeoutError } from '../utils/errors.js';
 import type { ProxyConfig } from '../proxy/types.js';
 import { getHttpAgent } from '../proxy/index.js';
-import { isConfirmedPrivateUrl } from '../utils/url.js';
+import { pinnedLookup, safeResolveHost } from '../utils/url.js';
 
 export interface DirectDownloadOptions {
   url: string;
@@ -79,6 +79,25 @@ async function downloadWithRedirects(
 
   const agent = opts.proxyConfig ? getHttpAgent(opts.proxyConfig) : undefined;
 
+  // Resolve-and-pin DNS for this request. When a proxy agent is in play the
+  // proxy does its own resolution, so skip pinning in that case (the operator
+  // opted into that proxy and trusts its network). Otherwise we resolve the
+  // hostname once, validate, and hand http.get a `lookup` that returns the
+  // pinned address — so Node's HTTP client never re-resolves and the URL
+  // validator's answer can't be invalidated by a rebinding attack between
+  // check and connect.
+  let pinnedLookupFn: ReturnType<typeof pinnedLookup> | undefined;
+  if (!agent) {
+    const resolved = await safeResolveHost(parsed.hostname);
+    if (!resolved) {
+      throw new DownloadError(
+        `Host ${parsed.hostname} resolves to a private/internal address or failed DNS`,
+        'SSRF_BLOCKED',
+      );
+    }
+    pinnedLookupFn = pinnedLookup(resolved);
+  }
+
   return new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       req.destroy();
@@ -89,22 +108,20 @@ async function downloadWithRedirects(
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     };
 
-    const req = mod.get(url, { agent, headers }, (res) => {
-      // Handle redirects
+    const req = mod.get(url, { agent, headers, lookup: pinnedLookupFn }, (res) => {
+      // Handle redirects. Re-validation happens inside the recursive
+      // downloadWithRedirects via safeResolveHost — that way the lookup
+      // we validate against and the lookup we actually connect on are
+      // literally the same one (pinned). A separate up-front check
+      // would be a second DNS query that could disagree due to rebinding.
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         clearTimeout(timeout);
         const redirectUrl = new URL(res.headers.location, url).toString();
         res.resume(); // drain the response
-        isConfirmedPrivateUrl(redirectUrl).then((isPrivate) => {
-          if (isPrivate) {
-            reject(new DownloadError('Redirect to private/internal URL blocked', 'SSRF_BLOCKED'));
-            return;
-          }
-          downloadWithRedirects(redirectUrl, outputPath, {
-            ...opts,
-            redirectCount: opts.redirectCount + 1,
-          }).then(resolve, reject);
-        }).catch(reject);
+        downloadWithRedirects(redirectUrl, outputPath, {
+          ...opts,
+          redirectCount: opts.redirectCount + 1,
+        }).then(resolve, reject);
         return;
       }
 

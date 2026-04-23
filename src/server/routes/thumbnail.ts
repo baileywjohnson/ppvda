@@ -142,7 +142,7 @@ async function handleVideoThumbnail(
 
   await ffmpegRouteSem.acquire();
   try {
-    const { proc, stdout, kill } = spawnFfmpegStream({
+    const { proc, stdout, kill } = await spawnFfmpegStream({
       inputUrl: videoUrl,
       ffmpegPath: opts.ffmpegPath,
       proxyConfig: opts.proxyConfig,

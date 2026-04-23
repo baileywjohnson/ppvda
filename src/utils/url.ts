@@ -1,6 +1,90 @@
 import { lookup } from 'node:dns/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 
+/** IP address + address family from a validated hostname resolution. */
+export interface ResolvedHost {
+  /** The resolved IP literal (e.g. "203.0.113.42" or "2606:4700::1111"). */
+  address: string;
+  /** Address family — 4 for IPv4, 6 for IPv6. Matches the shape Node's dns
+   *  lookup callback expects, so this is safe to plug into `http.get`'s
+   *  custom `lookup` option. */
+  family: 4 | 6;
+}
+
+/**
+ * Resolve a hostname once, validate the result against all private-IP ranges
+ * and obfuscated-form traps, and return the validated address. Returns null
+ * (no throw) if the hostname is blocked for any reason so callers can pick
+ * their failure mode.
+ *
+ * This is the one-shot alternative to `isPrivateUrl`'s two-lookup rebinding
+ * detection: once you have the address, pin it into the actual HTTP request
+ * via Node's `lookup` option so the request never does its own DNS and
+ * therefore can't be rebound during the gap.
+ */
+export async function safeResolveHost(hostname: string): Promise<ResolvedHost | null> {
+  if (isPrivateHostname(hostname)) return null;
+  if (isObfuscatedIPv4(hostname)) return null;
+  try {
+    const result = await lookup(hostname);
+    if (isPrivateIP(result.address)) return null;
+    return {
+      address: result.address,
+      family: result.family === 6 ? 6 : 4,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build a Node-style `lookup` function that always returns a pre-validated
+ * address, ignoring the actual hostname passed in. Plug this into
+ * `http.get` / `https.get`'s `lookup` option so the HTTP client never does
+ * its own DNS resolution — closes the DNS-rebinding window between our
+ * validation and the actual connect.
+ *
+ * Handles all three call shapes `dns.lookup` can be invoked with:
+ *   lookup(hostname, callback)
+ *   lookup(hostname, options, callback)
+ *   lookup(hostname, {all: true, ...}, callback)  ← happy-eyeballs, default
+ *     on Node 20+ via autoSelectFamily. In this mode the callback's second
+ *     arg is an array of {address, family}, not a plain address string;
+ *     returning a string here produces a later "Invalid IP address: undefined"
+ *     when Node pulls `.address` off the string's first character.
+ */
+// Matches Node's dns.LookupFunction / socket `lookup` option shape — the
+// callback's second arg is `string | LookupAddress[]` depending on the
+// `all` flag; we return the right shape per the options.
+type PinnedLookupCb = (
+  err: NodeJS.ErrnoException | null,
+  address: string | Array<{ address: string; family: number }>,
+  family?: number,
+) => void;
+
+export function pinnedLookup(resolved: ResolvedHost) {
+  return function lookup(
+    _hostname: string,
+    optionsOrCallback: unknown,
+    maybeCallback?: PinnedLookupCb,
+  ): void {
+    let options: { all?: boolean; family?: number } = {};
+    let callback: PinnedLookupCb | undefined;
+    if (typeof optionsOrCallback === 'function') {
+      callback = optionsOrCallback as PinnedLookupCb;
+    } else {
+      options = (optionsOrCallback ?? {}) as typeof options;
+      callback = maybeCallback;
+    }
+    if (!callback) return;
+    if (options.all) {
+      callback(null, [{ address: resolved.address, family: resolved.family }]);
+    } else {
+      callback(null, resolved.address, resolved.family);
+    }
+  };
+}
+
 /**
  * Checks if a URL targets a private/reserved IP range.
  * Validates both the literal hostname and the resolved IP.

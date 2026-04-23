@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ProxyConfig } from '../proxy/types.js';
-import { getFfmpegEnv } from '../proxy/index.js';
+import { FFMPEG_PROTOCOL_WHITELIST, setupSubprocessEnv } from './ffmpeg.js';
 
 export interface ProbeResult {
   durationSec?: number;
@@ -36,7 +36,7 @@ export async function probeVideo(options: {
 
   const args = [
     '-v', 'quiet',
-    '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+    '-protocol_whitelist', FFMPEG_PROTOCOL_WHITELIST,
     '-print_format', 'json',
     '-show_format',
     '-show_streams',
@@ -44,14 +44,7 @@ export async function probeVideo(options: {
     url,
   ];
 
-  const env: Record<string, string> = {
-    PATH: process.env.PATH ?? '',
-    HOME: process.env.HOME ?? '',
-    TMPDIR: process.env.TMPDIR ?? '',
-  };
-  if (proxyConfig) {
-    Object.assign(env, getFfmpegEnv(proxyConfig));
-  }
+  const { env, cleanup } = await setupSubprocessEnv(proxyConfig);
 
   return new Promise<ProbeResult>((resolve) => {
     const proc = spawn(ffprobePath, args, {
@@ -60,10 +53,16 @@ export async function probeVideo(options: {
     });
 
     let stdout = '';
+    let settled = false;
+    const finish = (val: ProbeResult) => {
+      if (settled) return;
+      settled = true;
+      cleanup().finally(() => resolve(val));
+    };
 
     const timer = setTimeout(() => {
       proc.kill('SIGKILL');
-      resolve({});
+      finish({});
     }, timeoutMs);
 
     proc.stdout.on('data', (chunk: Buffer) => {
@@ -73,7 +72,7 @@ export async function probeVideo(options: {
     proc.on('close', (code) => {
       clearTimeout(timer);
       if (code !== 0) {
-        resolve({});
+        finish({});
         return;
       }
 
@@ -100,15 +99,15 @@ export async function probeVideo(options: {
           result.fileSize = size;
         }
 
-        resolve(result);
+        finish(result);
       } catch {
-        resolve({});
+        finish({});
       }
     });
 
     proc.on('error', () => {
       clearTimeout(timer);
-      resolve({});
+      finish({});
     });
   });
 }

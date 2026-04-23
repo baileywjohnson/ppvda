@@ -3,6 +3,51 @@ import type { Readable } from 'node:stream';
 import { FfmpegError, TimeoutError } from '../utils/errors.js';
 import type { ProxyConfig } from '../proxy/types.js';
 import { getFfmpegEnv } from '../proxy/index.js';
+import { SsrfProxy } from '../utils/ssrf-proxy.js';
+
+// Protocol whitelist for ffmpeg/ffprobe URL inputs. `file` is intentionally
+// absent — no legitimate extraction or download path needs local-file URIs,
+// and allowing it turned every `-i` into a potential path-disclosure or
+// server-side file-read primitive if the URL ever got user-influenced.
+// `crypto` is required for HLS AES-128 decryption; `tcp`/`tls` sit under
+// `http`/`https`. `httpproxy` is required when http_proxy/https_proxy env
+// vars are set — ffmpeg uses that internal protocol to speak to the proxy,
+// and if it's missing from the whitelist the input silently fails with
+// "Protocol 'httpproxy' not on whitelist" and no bytes are produced.
+export const FFMPEG_PROTOCOL_WHITELIST = 'http,https,httpproxy,tcp,tls,crypto';
+
+// Set up a subprocess environment for ffmpeg/ffprobe with an SSRF-filtering
+// choke-point in front of its HTTP egress. When the operator has configured
+// an explicit `proxyConfig` (SOCKS or HTTP proxy via PROXY_URL) we trust it
+// and skip the SSRF proxy — they've consciously opted into that network
+// path. Otherwise, we start a loopback-only HTTP proxy that every CONNECT
+// target and absolute-URI request has to pass `safeResolveHost` before the
+// tunnel opens, so ffmpeg cannot reach a private IP even via manifest
+// redirects or DNS rebinding between our validation and its connect.
+export async function setupSubprocessEnv(proxyConfig?: ProxyConfig): Promise<{
+  env: Record<string, string>;
+  cleanup: () => Promise<void>;
+}> {
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? '',
+    HOME: process.env.HOME ?? '',
+    TMPDIR: process.env.TMPDIR ?? '',
+  };
+  if (proxyConfig) {
+    Object.assign(env, getFfmpegEnv(proxyConfig));
+    return { env, cleanup: async () => {} };
+  }
+  const proxy = new SsrfProxy();
+  await proxy.start();
+  const url = proxy.url();
+  // Both lowercase (ffmpeg/libcurl convention) and uppercase — different
+  // builds look at different casings.
+  env.http_proxy = url;
+  env.https_proxy = url;
+  env.HTTP_PROXY = url;
+  env.HTTPS_PROXY = url;
+  return { env, cleanup: () => proxy.stop() };
+}
 
 export interface FfmpegOptions {
   inputUrl: string;
@@ -83,7 +128,7 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
 
   const args = [
     '-y',                    // overwrite output
-    '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+    '-protocol_whitelist', FFMPEG_PROTOCOL_WHITELIST,
     '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     '-i', inputUrl,          // input URL
     '-c', 'copy',            // copy codecs (no re-encoding)
@@ -93,15 +138,7 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
     outputPath,
   ];
 
-  // Build minimal environment — don't leak secrets to subprocess
-  const env: Record<string, string> = {
-    PATH: process.env.PATH ?? '',
-    HOME: process.env.HOME ?? '',
-    TMPDIR: process.env.TMPDIR ?? '',
-  };
-  if (proxyConfig) {
-    Object.assign(env, getFfmpegEnv(proxyConfig));
-  }
+  const { env, cleanup } = await setupSubprocessEnv(proxyConfig);
 
   return new Promise<FfmpegResult>((resolve, reject) => {
     const proc = spawn(ffmpegPath, args, {
@@ -111,10 +148,16 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
 
     let stderr = '';
     let durationSec: number | undefined;
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup().finally(fn);
+    };
 
     const timeout = setTimeout(() => {
       proc.kill('SIGKILL');
-      reject(new TimeoutError(`ffmpeg timed out after ${timeoutMs}ms`));
+      settle(() => reject(new TimeoutError(`ffmpeg timed out after ${timeoutMs}ms`)));
     }, timeoutMs);
 
     proc.stderr.on('data', (chunk: Buffer) => {
@@ -131,20 +174,19 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
 
     proc.on('close', (code) => {
       clearTimeout(timeout);
-
       if (code === 0) {
-        resolve({ success: true, durationSec });
+        settle(() => resolve({ success: true, durationSec }));
       } else {
-        reject(new FfmpegError(`ffmpeg exited with code ${code}`, 'FFMPEG_PROCESS_ERROR'));
+        settle(() => reject(new FfmpegError(`ffmpeg exited with code ${code}`, 'FFMPEG_PROCESS_ERROR')));
       }
     });
 
     proc.on('error', (err) => {
       clearTimeout(timeout);
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        reject(new FfmpegError(`ffmpeg not found at: ${ffmpegPath}`, 'FFMPEG_NOT_FOUND'));
+        settle(() => reject(new FfmpegError(`ffmpeg not found at: ${ffmpegPath}`, 'FFMPEG_NOT_FOUND')));
       } else {
-        reject(new FfmpegError(err.message, 'FFMPEG_SPAWN_ERROR'));
+        settle(() => reject(new FfmpegError(err.message, 'FFMPEG_SPAWN_ERROR')));
       }
     });
   });
@@ -165,11 +207,11 @@ export interface FfmpegStreamOptions {
  * Default args remux to fragmented MP4 (streamable, modifies file hash).
  * Pass custom `args` to override (e.g., for thumbnail extraction).
  */
-export function spawnFfmpegStream(options: FfmpegStreamOptions): {
+export async function spawnFfmpegStream(options: FfmpegStreamOptions): Promise<{
   proc: ChildProcess;
   stdout: Readable;
   kill: () => void;
-} {
+}> {
   const { inputUrl, ffmpegPath, proxyConfig, timeoutMs = 300000 } = options;
 
   // Block non-HTTP protocols to prevent file://, gopher://, concat: etc.
@@ -179,7 +221,7 @@ export function spawnFfmpegStream(options: FfmpegStreamOptions): {
   }
 
   // Always include protocol whitelist, even with custom args
-  const baseArgs = ['-protocol_whitelist', 'file,http,https,tcp,tls,crypto'];
+  const baseArgs = ['-protocol_whitelist', FFMPEG_PROTOCOL_WHITELIST];
   const args = options.args
     ? [...baseArgs, ...options.args]
     : [
@@ -193,14 +235,7 @@ export function spawnFfmpegStream(options: FfmpegStreamOptions): {
       'pipe:1',
     ];
 
-  const env: Record<string, string> = {
-    PATH: process.env.PATH ?? '',
-    HOME: process.env.HOME ?? '',
-    TMPDIR: process.env.TMPDIR ?? '',
-  };
-  if (proxyConfig) {
-    Object.assign(env, getFfmpegEnv(proxyConfig));
-  }
+  const { env, cleanup: stopProxy } = await setupSubprocessEnv(proxyConfig);
 
   const proc = spawn(ffmpegPath, args, {
     env,
@@ -211,13 +246,22 @@ export function spawnFfmpegStream(options: FfmpegStreamOptions): {
     proc.kill('SIGKILL');
   }, timeoutMs);
 
-  const cleanup = () => { clearTimeout(timer); };
+  let stopped = false;
+  const cleanup = () => {
+    clearTimeout(timer);
+    if (!stopped) {
+      stopped = true;
+      // Fire-and-forget — the caller has already moved on by now, we just
+      // don't want to keep the proxy listener alive past ffmpeg exit.
+      stopProxy().catch(() => { /* best effort */ });
+    }
+  };
   proc.on('close', cleanup);
   proc.on('error', cleanup);
 
   return {
     proc,
     stdout: proc.stdout as Readable,
-    kill: () => { clearTimeout(timer); proc.kill('SIGKILL'); },
+    kill: () => { cleanup(); proc.kill('SIGKILL'); },
   };
 }

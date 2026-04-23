@@ -6,7 +6,13 @@ PPVDA is a privacy-focused video extractor/downloader. It runs a headless Chromi
 
 ### In scope
 
-- **SSRF defense**: user-supplied URLs cannot target RFC1918, loopback, link-local, cloud-metadata, or IPv6 private ranges, *including* obfuscated IPv4 encodings (decimal `http://2130706433/`, hex `http://0x7f.0.0.1/`, leading-zero octal). DNS rebinding is detected via double-resolution at the route level and blocked at the browser level via Chromium `--host-rules`.
+- **SSRF defense**: user-supplied URLs cannot target RFC1918, loopback, link-local, cloud-metadata, or IPv6 private ranges, *including* obfuscated IPv4 encodings. Defense is layered so every outbound egress hits a validator the HTTP client cannot bypass:
+  - **Route-level checks** reject private / obfuscated addresses up front.
+  - **Node fetch paths** (direct downloads, Darkreel client) use DNS pinning — one `safeResolveHost` call resolves + validates, the address is pinned into `http.get`'s `lookup` option, the client never re-resolves. Closes the DNS-rebinding window between check and connect. Redirect hops recurse through the same pinned flow.
+  - **ffmpeg / ffprobe** go through a loopback-only forward proxy (per-invocation, random port, closed on exit). Every `CONNECT` and absolute-URI request is validated via `safeResolveHost` before the tunnel opens — so HLS/DASH segment URIs ffmpeg fetches autonomously can't reach private IPs either.
+  - **Chromium** blocks private CIDRs at the navigation layer via `--host-rules`.
+  - `file://` is removed from the ffmpeg/ffprobe `-protocol_whitelist` so a user-influenced URL can't be redirected into local-file-read.
+  - Operator caveat: the SSRF proxy blocks private destinations for ffmpeg/ffprobe too. If you genuinely need ffmpeg to reach a private-network media source (unusual), configure an explicit `PROXY_URL` — PPVDA will defer to your operator-chosen proxy instead of installing its own SSRF filter.
 - **Credential confidentiality**: PPVDA no longer holds any Darkreel password. Connect runs a delegation exchange (copy-paste authorization code) that returns a scoped refresh token + the user's Darkreel X25519 public key; PPVDA stores only those two, with the refresh token AES-256-GCM-encrypted at rest under the user's PPVDA master key (AAD = user ID). A full PPVDA compromise grants *upload-only* capability to each connected Darkreel account — not read, list, or delete.
 - **Authentication integrity**: Argon2id password hashing, timing-safe comparisons, dummy-hash-on-miss to prevent username enumeration, per-username rate limiting (10/15 min), `httpOnly` + `SameSite=strict` + `Secure` session cookies (Secure is gated on `PUBLIC_URL` being HTTPS, falling back to `NODE_ENV === 'production'`), JWT HS256 with a required `JWT_SECRET` that's length-AND-entropy-checked at startup.
 - **Subprocess isolation**: `ffmpeg`, `ffprobe`, and WireGuard are spawned via argv arrays with explicit env — no shell, no inheritance of parent secrets beyond what each needs. Darkreel uploads run in-process (sealed-box crypto via Node's Web Crypto); there is no subprocess to leak environment variables.
@@ -80,5 +86,4 @@ Only `main` is supported. The deploy workflow ships the latest commit to product
 
 ## Future work
 
-- Short-lived scoped Darkreel upload tokens to replace the `DRK_PASS` subprocess-env flow.
 - Optional SQLCipher for at-rest DB encryption.
