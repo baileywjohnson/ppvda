@@ -1,12 +1,17 @@
-import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import dns from 'node:dns/promises';
-import { ensureDir, secureUnlink } from '../utils/fs.js';
 import type { DeviceInfo, RelayServer } from './types.js';
+import { rpcAddRoutes, rpcBringup, rpcGateway, rpcTeardown } from './supervisor-rpc.js';
 
-const execFileAsync = promisify(execFile);
+// This module used to execFile('wg-quick'/'ip'/'writeFile') directly from
+// the Node process, which meant the whole process needed CAP_NET_ADMIN and
+// root — and therefore so did every Playwright-spawned Chromium, which
+// can't run its user-namespace sandbox as root. Now every privileged
+// action is a single-line RPC to wg-supervisor, which is the only part of
+// the container that runs as root. The main Node process runs as the
+// unprivileged `ppvda` user and Chromium's sandbox works.
+//
+// The public surface of this file is unchanged — callers don't see the
+// socket — so src/mullvad/index.ts and the VPN admin routes keep working.
 
 const WG_INTERFACE = 'wg0';
 const WG_PORT = 51820;
@@ -52,65 +57,42 @@ Endpoint = ${server.ipv4AddrIn}:${WG_PORT}
 }
 
 /**
- * Write WireGuard config and bring up the tunnel.
+ * Bring up the WireGuard tunnel by handing the rendered config to
+ * wg-supervisor. The supervisor writes `${configDir}/wg0.conf` (mode
+ * 0600), runs `wg-quick up`, and overrides `/etc/resolv.conf` to the
+ * Mullvad resolver. All privileged work happens on the supervisor side.
  */
 export async function startTunnel(configDir: string, wgConfig: string): Promise<void> {
-  await ensureDir(configDir);
-
-  const configPath = join(configDir, `${WG_INTERFACE}.conf`);
-  await writeFile(configPath, wgConfig, { mode: 0o600 });
-
   try {
-    await execFileAsync('wg-quick', ['up', configPath]);
+    await rpcBringup(configDir, wgConfig);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to start WireGuard tunnel: ${msg}`);
   }
-
-  // Docker manages /etc/resolv.conf and ignores resolvconf.
-  // Manually override DNS to use Mullvad's resolver through the tunnel.
-  try {
-    await writeFile('/etc/resolv.conf', 'nameserver 10.64.0.1\n', { mode: 0o644 });
-  } catch {
-    // Non-fatal — DNS will use Docker's resolver (less private but functional)
-  }
 }
 
 /**
- * Tear down the WireGuard tunnel.
+ * Tear down the WireGuard tunnel and restore the embedded Docker DNS
+ * resolver. Best-effort — the supervisor ignores "tunnel not up" errors
+ * so repeated teardowns are safe.
  */
 export async function stopTunnel(configDir: string): Promise<void> {
-  const configPath = join(configDir, `${WG_INTERFACE}.conf`);
-
   try {
-    await execFileAsync('wg-quick', ['down', configPath]);
+    await rpcTeardown(configDir);
   } catch {
-    // Tunnel may not be up — ignore
+    // Tunnel may not be up or supervisor may be mid-restart — ignore
   }
-
-  // Restore Docker's default DNS resolver. startTunnel() overwrites
-  // /etc/resolv.conf with Mullvad's DNS (10.64.0.1) which becomes
-  // unreachable once the tunnel is down, breaking all DNS lookups.
-  try {
-    await writeFile('/etc/resolv.conf', 'nameserver 127.0.0.11\n', { mode: 0o644 });
-  } catch {
-    // Non-fatal
-  }
-
-  // Securely overwrite the config file before unlinking — it contains the
-  // WireGuard private key. secureUnlink writes random bytes + fsyncs before unlink.
-  await secureUnlink(configPath).catch(() => {});
 }
 
 /**
- * Get the default gateway IP before the tunnel overrides it.
+ * Get the default gateway IP before the tunnel overrides it. Delegated
+ * to the supervisor because `ip route show default` lives in the same
+ * privileged toolbox, even though this specific read doesn't strictly
+ * need privileges.
  */
 export async function getDefaultGateway(): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync('ip', ['route', 'show', 'default']);
-    // "default via 172.17.0.1 dev eth0"
-    const match = stdout.match(/default via (\S+)/);
-    return match ? match[1] : null;
+    return await rpcGateway();
   } catch {
     return null;
   }
@@ -118,7 +100,8 @@ export async function getDefaultGateway(): Promise<string | null> {
 
 /**
  * Resolve a hostname to IPs and store the mappings.
- * Must be called BEFORE the tunnel starts (while Docker's DNS is still available).
+ * Must be called BEFORE the tunnel starts (while Docker's DNS is still
+ * available). Runs unprivileged in the Node process — just a DNS lookup.
  */
 export async function resolveBypassHost(hostname: string): Promise<string[]> {
   // If it's already an IP, return it directly
@@ -136,58 +119,22 @@ export async function resolveBypassHost(hostname: string): Promise<string[]> {
 }
 
 /**
- * Add route exceptions so traffic to specific IPs bypasses the WireGuard tunnel,
- * and write /etc/hosts entries so the hostnames resolve after VPN DNS takes over.
+ * Add route exceptions so traffic to specific IPs bypasses the WireGuard
+ * tunnel, and write /etc/hosts entries so the hostnames resolve after
+ * VPN DNS takes over. Both halves happen inside the supervisor — `ip
+ * route add` needs CAP_NET_ADMIN and /etc/hosts writes need root. Input
+ * validation (hostname charset, IPv4 shape) is re-checked on the
+ * supervisor side too so a bug here can't smuggle malformed values into
+ * privileged argv.
  */
 export async function addRouteExceptions(
   hosts: Array<{ hostname: string; ips: string[] }>,
   gateway: string,
 ): Promise<void> {
-  const { readFile, writeFile } = await import('node:fs/promises');
-
-  // Read existing /etc/hosts once so we can skip lines that already map the
-  // same ip→hostname pair. Plain appendFile-per-switch would grow /etc/hosts
-  // unboundedly across country changes (each switch re-adds every bypass).
-  let existing = '';
   try {
-    existing = await readFile('/etc/hosts', 'utf-8');
+    await rpcAddRoutes(gateway, hosts);
   } catch {
-    // Non-fatal — treat as empty if unreadable
-  }
-
-  const newEntries: string[] = [];
-  for (const { hostname, ips } of hosts) {
-    // Validate hostname to prevent /etc/hosts injection (no newlines, control chars, or spaces)
-    if (!/^[a-zA-Z0-9._-]+$/.test(hostname)) continue;
-
-    for (const ip of ips) {
-      // Validate IP format
-      if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) continue;
-
-      // Add route to bypass VPN
-      try {
-        await execFileAsync('ip', ['route', 'add', `${ip}/32`, 'via', gateway]);
-      } catch {
-        // Route may already exist
-      }
-
-      const entry = `${ip} ${hostname}`;
-      // Match a full line to avoid false positives from substring overlaps.
-      const lineRe = new RegExp(`^${entry.replace(/\./g, '\\.')}\\s*$`, 'm');
-      if (!lineRe.test(existing) && !newEntries.includes(entry)) {
-        newEntries.push(entry);
-      }
-    }
-  }
-
-  if (newEntries.length > 0) {
-    try {
-      const sep = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
-      await writeFile('/etc/hosts', existing + sep + newEntries.join('\n') + '\n');
-    } catch {
-      // Non-fatal — best-effort; a failure here just means hostname lookups
-      // go through VPN DNS instead of resolving locally.
-    }
+    // Non-fatal — best-effort; a failure here just means hostname lookups
+    // go through VPN DNS instead of resolving locally.
   }
 }
-

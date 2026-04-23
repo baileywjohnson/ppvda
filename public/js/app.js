@@ -380,10 +380,13 @@
       showResultsStreaming();
       removeLoadingIndicator();
       addVideoCard(directMatch, 0);
-      const card = resultsList.querySelector('[data-vid-idx="0"]');
-      if (card) card.querySelectorAll('.btn-download, .btn-upload').forEach(b => { b.disabled = false; });
-      const spinner = resultsList.querySelector('[data-probe-spinner="0"]');
-      if (spinner) spinner.remove();
+      // Clear the probe spinner + enable buttons via updateVideoMeta —
+      // it already walks all three result lists (resultsList, imagesList,
+      // filteredList) so it works regardless of which list addVideoCard
+      // picked. The pre-existing inline fixup only looked in resultsList,
+      // which left direct image URLs stuck in the waiting state because
+      // their card lives in imagesList.
+      updateVideoMeta(0, {});
       updateResultsTitle();
       btn.disabled = false;
       btn.textContent = 'Extract';

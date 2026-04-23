@@ -167,7 +167,7 @@ npm run dev
 
 ### VPN setup
 
-The Docker container uses `NET_ADMIN` capability and `/dev/net/tun` for WireGuard. When a Mullvad account is configured, PPVDA:
+The Docker container uses `NET_ADMIN` capability and `/dev/net/tun` for WireGuard. Only the privileged `wg-supervisor` helper exercises those capabilities — the main Node process runs as the unprivileged `ppvda` user and talks to the supervisor over a Unix socket for tunnel operations (see [Privilege split](#privilege-split) below). When a Mullvad account is configured, PPVDA:
 
 1. Generates fresh WireGuard keys on every startup (nothing persisted to disk)
 2. Registers a device with the Mullvad API
@@ -182,9 +182,15 @@ VPN_BYPASS_HOSTS=media.example.com
 
 Admins can switch VPN countries and manage per-user VPN permissions from the admin panel without restarting the container.
 
-### Privilege dropping
+### Privilege split
 
-The Docker entrypoint automatically drops root privileges to an unprivileged `ppvda` user when `MULLVAD_ACCOUNT` is **not** set — root is only needed to bring up the WireGuard tunnel. When Mullvad is configured, the container stays as root (required by the kernel for `NET_ADMIN`). This limits the blast radius of any future Chromium or subprocess sandbox escape when VPN is not in use.
+The Node process (and everything it spawns — Playwright, Chromium, ffmpeg, ffprobe) always runs as the unprivileged `ppvda` user, in both the bare and the Mullvad deployments. This lets Chromium's user-namespace sandbox work, so a renderer bug lands in a confined process instead of container root.
+
+In the Mullvad deployment, the operations that genuinely require `CAP_NET_ADMIN` — `wg-quick up`/`down`, `ip route add`, writing `/etc/resolv.conf` and `/etc/hosts` — are handled by a small privileged helper called **`wg-supervisor`**, written in Go (see [`wg-supervisor/`](wg-supervisor/)). The supervisor runs as root and listens on a Unix socket at `/run/ppvda/wg.sock`; the Node process sends length-prefixed JSON RPCs for four fixed operations (`BRINGUP`, `TEARDOWN`, `ADD_ROUTES`, `GATEWAY`). The supervisor authenticates every incoming connection via `SO_PEERCRED` and only accepts peers with the `ppvda` uid. No HTTP, no network listeners, no user input beyond the RPC payload.
+
+What this changes for the threat model: a Chromium renderer RCE (V8 bug, image codec bug, etc. — Chromium gets a couple of these a year) used to land in a root process with `NET_ADMIN` and could defeat the VPN kill-switch, edit `/etc/hosts`, or modify the routing table. Now it lands in an unprivileged process that can still read what the app can read (same uid) but cannot touch network configuration without also escaping Chromium's renderer sandbox *and* the kernel's user namespace.
+
+The bare deployment (no `MULLVAD_ACCOUNT`) doesn't start the supervisor and skips the socket entirely — Node just runs directly as `ppvda` since no privileged ops are needed.
 
 ### Backups
 
@@ -273,6 +279,7 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
   - `file://` is removed from the ffmpeg/ffprobe protocol whitelist, so a user-influenced URL can't be turned into a local-file-read primitive.
   - Admin-facing errors from Darkreel's delegation-exchange endpoint have their upstream response body stripped before surfacing, so an admin intentionally targeting a private URL (same-LAN Darkreel) can't be turned into an SSRF response-body leak.
 - **No shell injection** — All subprocesses (ffmpeg, ffprobe) spawned with argument arrays, never through a shell. No Darkreel password ever passes through a subprocess environment — the Darkreel client is in-process Node
+- **Privilege-split Mullvad path** — When VPN is configured, `CAP_NET_ADMIN`-requiring operations (wg-quick, ip route, `/etc/resolv.conf`, `/etc/hosts`) are handled by a small Go helper (`wg-supervisor`) running as root. The Node process — and every subprocess it spawns including Chromium — runs as the unprivileged `ppvda` user and talks to the helper over a Unix socket (`SO_PEERCRED`-authenticated, peer uid must match `ppvda`). Recovers Chromium's user-namespace sandbox so a renderer RCE can't reach network config. See [Privilege split](#privilege-split) for the threat-model shift
 - **Admin re-verification** — Admin status verified from the database on every privileged request. Revoking admin access takes effect immediately
 - **Rate limiting** — 100 requests/min globally, 5/min on login/register/recover endpoints
 - **Cookie security** — httpOnly, SameSite=strict, and Secure whenever the deployment URL (`PUBLIC_URL`) is HTTPS (falls back to `NODE_ENV === 'production'` for proxy-rewrite setups without `PUBLIC_URL`). No tokens in localStorage or query parameters

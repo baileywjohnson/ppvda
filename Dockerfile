@@ -33,6 +33,15 @@ COPY tsconfig.json ./
 COPY src/ ./src/
 RUN npm run build
 
+# --- wg-supervisor build stage ---
+# Builds the tiny privileged helper that owns CAP_NET_ADMIN operations.
+# Static binary, no C deps, Linux-only build tag so the supervisor source
+# doesn't interfere with host-OS dev builds. See wg-supervisor/main.go.
+FROM golang:1.26-alpine AS wg-supervisor-build
+WORKDIR /src
+COPY wg-supervisor/ ./
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /wg-supervisor .
+
 # --- Runtime stage ---
 FROM base AS runtime
 WORKDIR /app
@@ -44,20 +53,25 @@ WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY --from=wg-supervisor-build /wg-supervisor /usr/local/bin/wg-supervisor
+RUN chmod 0755 /usr/local/bin/wg-supervisor
 COPY public/ ./public/
 COPY build.sh ./
 RUN bash build.sh && rm build.sh
 COPY package.json ./
 
-# Create non-root user for the app process
+# Create non-root user for the app process. The wg-supervisor runs as root
+# and listens on /run/ppvda/wg.sock; we pre-create the directory so the
+# socket can be chowned to ppvda at startup.
 RUN groupadd -r ppvda && useradd -r -g ppvda -m ppvda \
-    && mkdir -p /app/downloads /app/tmp /app/mullvad /app/data \
-    && chown -R ppvda:ppvda /app
+    && mkdir -p /app/downloads /app/tmp /app/mullvad /app/data /run/ppvda \
+    && chown -R ppvda:ppvda /app /run/ppvda
 
-# Entrypoint drops to the `ppvda` user when Mullvad/WireGuard is NOT
-# configured. When Mullvad IS configured, the container must run as root
-# (requires NET_ADMIN capability and /dev/net/tun) — start with
-# --cap-add=NET_ADMIN and --device=/dev/net/tun (docker-compose handles this).
+# Entrypoint drops to the `ppvda` user in both Mullvad and non-Mullvad
+# deployments. When Mullvad IS configured, the container still needs
+# --cap-add=NET_ADMIN and --device=/dev/net/tun on the docker run / compose
+# side, but only wg-supervisor uses those capabilities — the Node process
+# (and therefore Chromium) runs unprivileged so the browser sandbox works.
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
