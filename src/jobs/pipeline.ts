@@ -223,48 +223,68 @@ async function processJob(
 
   // Step 3: Upload to Darkreel (if the user has a Shape 2 delegation configured)
   const delegation = getUserDarkreelDelegation(db, sessions, userId);
-  if (delegation) {
-    store.update(jobId, { status: 'encrypting' });
 
+  // Handle the three non-ok cases explicitly. Previously they were all
+  // conflated as "Darkreel not configured, mark done" — which silently
+  // turned session-expired and decrypt-failed jobs into phantom successes
+  // (file deleted, job marked `done`, nothing arrives in Darkreel).
+  if (delegation.state === 'session-expired' || delegation.state === 'decrypt-failed') {
     const job = store.get(jobId);
-    if (!job?.filePath) {
-      store.update(jobId, { status: 'failed', error: 'No file path after download' });
-      return;
+    if (job?.filePath) {
+      await secureUnlink(job.filePath);
     }
+    const msg = delegation.state === 'session-expired'
+      ? 'Could not upload to Darkreel — your session expired mid-job. Log in and resubmit.'
+      : 'Could not decrypt your Darkreel delegation. Reconnect Darkreel from Settings.';
+    store.update(jobId, { status: 'failed', error: msg });
+    logger.error({ jobId, state: delegation.state }, 'Darkreel delegation unavailable');
+    return;
+  }
 
-    try {
-      const result = await uploadToDarkreel({
-        conn: {
-          serverUrl: delegation.serverUrl,
-          userId: delegation.darkreelUserId,
-          delegationId: delegation.delegationId,
-          publicKey: delegation.publicKey,
-          refreshToken: delegation.refreshToken,
-        },
-        filePath: job.filePath,
-        ffmpegPath: opts.ffmpegPath,
-        timeoutMs: opts.drkUploadTimeoutMs,
-      });
-
-      if (result.success) {
-        await secureUnlink(job.filePath);
-        store.update(jobId, { status: 'done' });
-        logger.info({ jobId }, 'Uploaded to Darkreel');
-      } else {
-        store.update(jobId, { status: 'failed', error: result.error ?? 'Darkreel upload failed' });
-        logger.error({ jobId, err: result.error, detail: result.detail }, 'Darkreel upload failed');
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      store.update(jobId, { status: 'failed', error: 'Darkreel upload failed' });
-      logger.error({ jobId, err: errMsg }, 'Darkreel upload error');
-    }
-  } else {
+  if (delegation.state === 'not-configured') {
     // No Darkreel configured — delete the local file (don't retain media on PPVDA)
     const job = store.get(jobId);
     if (job?.filePath) {
       await secureUnlink(job.filePath);
     }
     store.update(jobId, { status: 'done' });
+    return;
+  }
+
+  // delegation.state === 'ok' — proceed with upload
+  store.update(jobId, { status: 'encrypting' });
+
+  const job = store.get(jobId);
+  if (!job?.filePath) {
+    store.update(jobId, { status: 'failed', error: 'No file path after download' });
+    return;
+  }
+
+  try {
+    const result = await uploadToDarkreel({
+      conn: {
+        serverUrl: delegation.serverUrl,
+        userId: delegation.darkreelUserId,
+        delegationId: delegation.delegationId,
+        publicKey: delegation.publicKey,
+        refreshToken: delegation.refreshToken,
+      },
+      filePath: job.filePath,
+      ffmpegPath: opts.ffmpegPath,
+      timeoutMs: opts.drkUploadTimeoutMs,
+    });
+
+    if (result.success) {
+      await secureUnlink(job.filePath);
+      store.update(jobId, { status: 'done' });
+      logger.info({ jobId }, 'Uploaded to Darkreel');
+    } else {
+      store.update(jobId, { status: 'failed', error: result.error ?? 'Darkreel upload failed' });
+      logger.error({ jobId, err: result.error, detail: result.detail }, 'Darkreel upload failed');
+    }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    store.update(jobId, { status: 'failed', error: 'Darkreel upload failed' });
+    logger.error({ jobId, err: errMsg }, 'Darkreel upload error');
   }
 }

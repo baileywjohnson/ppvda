@@ -709,19 +709,83 @@
         body: JSON.stringify({ videoUrl: video.url, useVpn }),
       });
 
-      if (res.ok) {
-        btn.textContent = 'Sent';
-      } else {
+      if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         if (data.error === 'Unauthorized') { logout(); return; }
+        // Surface the server's error text to the title attribute so the
+        // user can hover for detail without us inventing a truncation.
         btn.textContent = 'Failed';
+        btn.title = data.error ?? 'Job submission rejected';
         btn.disabled = false;
+        return;
       }
+
+      // Job was accepted — but "accepted" isn't "delivered". Jobs run
+      // async: extract → download → remux → encrypt → upload. A lot can
+      // still go wrong (VPN dropped, delegation decrypt failed, Darkreel
+      // unreachable, etc.), and the backend used to silently mark some
+      // of those as `done` which left users clicking "Send" with nothing
+      // arriving in Darkreel. Poll the job until it terminates so the
+      // button reflects reality.
+      const submit = await res.json().catch(() => ({}));
+      const jobId = submit?.data?.id;
+      if (!jobId) {
+        btn.textContent = 'Sent';
+        return;
+      }
+      btn.innerHTML = '<span class="spinner-mini"></span> Uploading...';
+      pollJobUntilDone(btn, jobId);
     } catch {
       btn.textContent = 'Failed';
+      btn.title = 'Network error submitting job';
       btn.disabled = false;
-      btn.textContent = 'Upload to Darkreel';
     }
+  }
+
+  // Poll /jobs/:id every few seconds until the job terminates. Caps at
+  // ~10 minutes — longer than the longest typical job — so a stuck job
+  // doesn't run the poller forever. Final button text reflects the real
+  // outcome: "Uploaded" for success, "Failed" with error title on failure.
+  async function pollJobUntilDone(btn, jobId) {
+    const startMs = Date.now();
+    const MAX_POLL_MS = 10 * 60 * 1000;
+    const INTERVAL_MS = 2500;
+    while (Date.now() - startMs < MAX_POLL_MS) {
+      await new Promise((r) => setTimeout(r, INTERVAL_MS));
+      let status;
+      let jobErr;
+      try {
+        const r = await api(`/jobs/${jobId}`);
+        if (!r.ok) {
+          // 404 = job was evicted from history. Treat as unknown rather
+          // than claiming success.
+          btn.textContent = 'Status unknown';
+          btn.title = 'Job dropped from history before it completed';
+          return;
+        }
+        const body = await r.json();
+        status = body?.data?.status;
+        jobErr = body?.data?.error;
+      } catch {
+        // Transient network error — keep polling until the overall cap.
+        continue;
+      }
+      if (status === 'done') {
+        btn.textContent = 'Uploaded';
+        btn.title = '';
+        return;
+      }
+      if (status === 'failed') {
+        btn.textContent = 'Failed';
+        btn.title = jobErr ?? 'Darkreel upload failed';
+        btn.disabled = false;
+        return;
+      }
+      // Still in-flight (extracting / downloading / encrypting) — keep polling
+    }
+    btn.textContent = 'Timed out';
+    btn.title = 'Job did not complete within the polling window';
+    btn.disabled = false;
   }
 
   // --- Helpers ---

@@ -173,16 +173,52 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
  * configured Darkreel delegation. Used by the job pipeline at upload time.
  * Caller is responsible for zeroing the returned refreshToken buffer.
  */
+export type DarkreelDelegationResult =
+  | {
+      state: 'ok';
+      serverUrl: string;
+      darkreelUserId: string;
+      delegationId: string;
+      publicKey: Buffer;
+      refreshToken: string;
+    }
+  | { state: 'not-configured' }
+  | { state: 'session-expired' }
+  | { state: 'decrypt-failed' };
+
+/**
+ * Fetch the user's Darkreel delegation. Returns a discriminated result
+ * because the three "can't use it" cases are semantically different and
+ * used to be silently conflated by the job pipeline:
+ *
+ *   - `not-configured`: no row in the delegations table. The user just
+ *     hasn't connected a Darkreel account; uploading to Darkreel is a
+ *     no-op and the job flow retains the downloaded file locally.
+ *   - `session-expired`: the master key isn't in the in-memory session
+ *     store. The user logged out (or the session expired, or the server
+ *     restarted) while the job was mid-flight. Without the master key
+ *     we can't decrypt the refresh token — this is a real failure the
+ *     user should see, not a silent "success."
+ *   - `decrypt-failed`: master key is present but AES-GCM rejected the
+ *     ciphertext. Usually means the delegation was stored under a
+ *     different master key (e.g., the user changed their password
+ *     without re-connecting). Real failure.
+ *
+ * The previous `null`-for-everything return made the pipeline mark
+ * session-expired and decrypt-failed jobs as `done`, which is why
+ * users hit "Send to Darkreel" and saw nothing arrive — it looked like
+ * "Darkreel isn't configured" to the backend.
+ */
 export function getUserDarkreelDelegation(
   db: DB,
   sessions: SessionStore,
   userId: string,
-): { serverUrl: string; darkreelUserId: string; delegationId: string; publicKey: Buffer; refreshToken: string } | null {
+): DarkreelDelegationResult {
   const row = db.getDarkreelDelegation(userId);
-  if (!row) return null;
+  if (!row) return { state: 'not-configured' };
 
   const masterKey = sessions.getKeyForUser(userId);
-  if (!masterKey) return null;
+  if (!masterKey) return { state: 'session-expired' };
 
   try {
     const userIdBytes = Buffer.from(userId, 'utf-8');
@@ -190,6 +226,7 @@ export function getUserDarkreelDelegation(
     const refreshToken = refreshTokenBytes.toString('utf-8');
     zeroBuffer(refreshTokenBytes);
     return {
+      state: 'ok',
       serverUrl: row.server_url,
       darkreelUserId: row.darkreel_user_id,
       delegationId: row.delegation_id,
@@ -197,7 +234,7 @@ export function getUserDarkreelDelegation(
       refreshToken,
     };
   } catch {
-    return null;
+    return { state: 'decrypt-failed' };
   } finally {
     zeroBuffer(masterKey);
   }
