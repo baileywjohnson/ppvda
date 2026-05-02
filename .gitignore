@@ -10,6 +10,7 @@ backup.key
 backups/
 darkreel-cli
 darkreel-cli-linux
+wg-supervisor/wg-supervisor
 *.tgz
 .DS_Store
 /mullvad/
