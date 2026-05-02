@@ -122,8 +122,61 @@ async function getBrowser(proxy?: ProxyConfig): Promise<Browser> {
           + 'MAP 192.168.* ~NOTFOUND, '
           + 'MAP 169.254.* ~NOTFOUND, '
           + 'MAP 0.* ~NOTFOUND, '
+          // CGNAT (RFC 6598): 100.64.0.0/10
+          + 'MAP 100.64.* ~NOTFOUND, MAP 100.65.* ~NOTFOUND, MAP 100.66.* ~NOTFOUND, MAP 100.67.* ~NOTFOUND, '
+          + 'MAP 100.68.* ~NOTFOUND, MAP 100.69.* ~NOTFOUND, MAP 100.70.* ~NOTFOUND, MAP 100.71.* ~NOTFOUND, '
+          + 'MAP 100.72.* ~NOTFOUND, MAP 100.73.* ~NOTFOUND, MAP 100.74.* ~NOTFOUND, MAP 100.75.* ~NOTFOUND, '
+          + 'MAP 100.76.* ~NOTFOUND, MAP 100.77.* ~NOTFOUND, MAP 100.78.* ~NOTFOUND, MAP 100.79.* ~NOTFOUND, '
+          + 'MAP 100.80.* ~NOTFOUND, MAP 100.81.* ~NOTFOUND, MAP 100.82.* ~NOTFOUND, MAP 100.83.* ~NOTFOUND, '
+          + 'MAP 100.84.* ~NOTFOUND, MAP 100.85.* ~NOTFOUND, MAP 100.86.* ~NOTFOUND, MAP 100.87.* ~NOTFOUND, '
+          + 'MAP 100.88.* ~NOTFOUND, MAP 100.89.* ~NOTFOUND, MAP 100.90.* ~NOTFOUND, MAP 100.91.* ~NOTFOUND, '
+          + 'MAP 100.92.* ~NOTFOUND, MAP 100.93.* ~NOTFOUND, MAP 100.94.* ~NOTFOUND, MAP 100.95.* ~NOTFOUND, '
+          + 'MAP 100.96.* ~NOTFOUND, MAP 100.97.* ~NOTFOUND, MAP 100.98.* ~NOTFOUND, MAP 100.99.* ~NOTFOUND, '
+          + 'MAP 100.100.* ~NOTFOUND, MAP 100.101.* ~NOTFOUND, MAP 100.102.* ~NOTFOUND, MAP 100.103.* ~NOTFOUND, '
+          + 'MAP 100.104.* ~NOTFOUND, MAP 100.105.* ~NOTFOUND, MAP 100.106.* ~NOTFOUND, MAP 100.107.* ~NOTFOUND, '
+          + 'MAP 100.108.* ~NOTFOUND, MAP 100.109.* ~NOTFOUND, MAP 100.110.* ~NOTFOUND, MAP 100.111.* ~NOTFOUND, '
+          + 'MAP 100.112.* ~NOTFOUND, MAP 100.113.* ~NOTFOUND, MAP 100.114.* ~NOTFOUND, MAP 100.115.* ~NOTFOUND, '
+          + 'MAP 100.116.* ~NOTFOUND, MAP 100.117.* ~NOTFOUND, MAP 100.118.* ~NOTFOUND, MAP 100.119.* ~NOTFOUND, '
+          + 'MAP 100.120.* ~NOTFOUND, MAP 100.121.* ~NOTFOUND, MAP 100.122.* ~NOTFOUND, MAP 100.123.* ~NOTFOUND, '
+          + 'MAP 100.124.* ~NOTFOUND, MAP 100.125.* ~NOTFOUND, MAP 100.126.* ~NOTFOUND, MAP 100.127.* ~NOTFOUND, '
+          // Internal/local DNS suffixes — covers cloud metadata aliases like
+          // metadata.google.internal and Kubernetes/Docker *.local.
+          + 'MAP *.internal ~NOTFOUND, '
+          + 'MAP *.local ~NOTFOUND, '
+          // IPv6 loopback and unspecified
           + 'MAP [::1] ~NOTFOUND, '
-          + 'MAP [::] ~NOTFOUND',
+          + 'MAP [::] ~NOTFOUND, '
+          // IPv6 ULA (fc00::/7) and link-local (fe80::/10) — Chromium
+          // host-rules glob matches the leading hex chars of a bracketed
+          // literal, so [fc..] / [fd..] / [fe80..] all need entries.
+          + 'MAP [fc*] ~NOTFOUND, '
+          + 'MAP [fd*] ~NOTFOUND, '
+          + 'MAP [fe80*] ~NOTFOUND, '
+          + 'MAP [fe81*] ~NOTFOUND, '
+          + 'MAP [fe82*] ~NOTFOUND, '
+          + 'MAP [fe83*] ~NOTFOUND, '
+          + 'MAP [fe84*] ~NOTFOUND, '
+          + 'MAP [fe85*] ~NOTFOUND, '
+          + 'MAP [fe86*] ~NOTFOUND, '
+          + 'MAP [fe87*] ~NOTFOUND, '
+          + 'MAP [fe88*] ~NOTFOUND, '
+          + 'MAP [fe89*] ~NOTFOUND, '
+          + 'MAP [fe8a*] ~NOTFOUND, '
+          + 'MAP [fe8b*] ~NOTFOUND, '
+          + 'MAP [fe8c*] ~NOTFOUND, '
+          + 'MAP [fe8d*] ~NOTFOUND, '
+          + 'MAP [fe8e*] ~NOTFOUND, '
+          + 'MAP [fe8f*] ~NOTFOUND, '
+          // 6to4 wrappers of private/loopback IPv4: 2002:0a*::/, 2002:7f*::/,
+          // 2002:c0a8*::/, etc. The full 6to4 mapping table would be huge;
+          // these cover the most common private-target embeddings.
+          + 'MAP [2002:7f*] ~NOTFOUND, '
+          + 'MAP [2002:0a*] ~NOTFOUND, '
+          + 'MAP [2002:a9fe*] ~NOTFOUND, '
+          + 'MAP [2002:c0a8*] ~NOTFOUND, '
+          // NAT64 mapping prefix 64:ff9b::/96 wraps any IPv4 (including
+          // private). The route-level isPrivateUrl also blocks this.
+          + 'MAP [64:ff9b:*] ~NOTFOUND',
       ],
       ...(proxy ? { proxy: getPlaywrightProxy(proxy) } : {}),
     });

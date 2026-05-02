@@ -56,15 +56,27 @@ const (
 type request struct {
 	Op string `json:"op"`
 
-	// BRINGUP: ConfigDir is where wg0.conf goes; Config is its full text.
-	// We write the config (0600) and run `wg-quick up <path>`.
-	ConfigDir string `json:"configDir,omitempty"`
-	Config    string `json:"config,omitempty"`
+	// BRINGUP: typed fields the supervisor uses to render wg0.conf itself.
+	// We deliberately do NOT accept the full config text from the caller —
+	// `wg-quick` honors `PostUp`/`PreUp`/`PostDown`/`PreDown` lines as
+	// `/bin/sh -c …`, so a free-form config field would let any caller that
+	// reaches this RPC execute arbitrary commands as root. Every field is
+	// regex-validated against a tight shape before going anywhere near the
+	// rendered config string.
+	ConfigDir      string `json:"configDir,omitempty"`
+	PrivateKey     string `json:"privateKey,omitempty"`     // base64 WG key (44 chars, "=" suffix)
+	Address        string `json:"address,omitempty"`        // IPv4 CIDR ("10.x.y.z/32")
+	DNS            string `json:"dns,omitempty"`            // IPv4 ("10.64.0.1")
+	PeerPublicKey  string `json:"peerPublicKey,omitempty"`  // base64 WG key
+	PeerEndpoint   string `json:"peerEndpoint,omitempty"`   // "ipv4:port"
+	PeerAllowedIPs string `json:"peerAllowedIPs,omitempty"` // exact "0.0.0.0/0" or "::/0"
+	RelayIP        string `json:"relayIP,omitempty"`        // IPv4 of the relay endpoint, for bypass route
 
-	// ADD_ROUTES: adds `ip route add <ip>/32 via <gateway>` for each (host, ip)
-	// pair and appends unique `<ip> <host>` lines to /etc/hosts.
-	Gateway string        `json:"gateway,omitempty"`
-	Hosts   []hostBypass  `json:"hosts,omitempty"`
+	// ADD_ROUTES (and shared with BRINGUP for the PostUp/PreDown gateway):
+	// adds `ip route add <ip>/32 via <gateway>` for each (host, ip) pair and
+	// appends unique `<ip> <host>` lines to /etc/hosts.
+	Gateway string       `json:"gateway,omitempty"`
+	Hosts   []hostBypass `json:"hosts,omitempty"`
 }
 
 type hostBypass struct {
@@ -85,6 +97,13 @@ var (
 	// subprocess argv, so a bug in PPVDA can't smuggle a malformed value.
 	hostnameRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 	ipv4Re     = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`)
+
+	// WireGuard base64 keys are 32 raw bytes → 44 chars padded base64; the
+	// last char is always '=' for a 32-byte input.
+	wgKeyRe       = regexp.MustCompile(`^[A-Za-z0-9+/]{43}=$`)
+	ipv4CIDRRe    = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}$`)
+	ipv4PortRe    = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}$`)
+	allowedIPsSet = map[string]bool{"0.0.0.0/0": true, "::/0": true}
 )
 
 func main() {
@@ -212,27 +231,71 @@ func dispatch(r request) response {
 	}
 }
 
-// doBringup writes wg0.conf (0600) and runs `wg-quick up <path>`. Also
-// overwrites /etc/resolv.conf to the Mullvad resolver so post-tunnel DNS
-// works. All paths are restricted to the caller-supplied configDir which
-// must be an absolute path; we don't tolerate relative paths because they
+// doBringup validates each typed field, renders wg0.conf from a fixed
+// template, writes it (0600), and runs `wg-quick up <path>`. The config
+// text is built here rather than accepted from the caller because
+// `wg-quick` executes `PostUp`/`PreUp`/`PostDown`/`PreDown` directives
+// via `/bin/sh -c …` — accepting free-form config from the (peer-uid-
+// authenticated but otherwise unprivileged) caller would let any
+// compromise of the PPVDA process escalate to root.
+//
+// All paths are restricted to the caller-supplied configDir which must
+// be an absolute path; we don't tolerate relative paths because they
 // would be resolved against the supervisor's cwd, not PPVDA's.
 func doBringup(r request) response {
 	if r.ConfigDir == "" || !filepath.IsAbs(r.ConfigDir) {
 		return response{Error: "configDir must be an absolute path"}
 	}
-	if r.Config == "" {
-		return response{Error: "config is empty"}
+	if !wgKeyRe.MatchString(r.PrivateKey) {
+		return response{Error: "invalid privateKey"}
 	}
-	if len(r.Config) > 16*1024 {
-		return response{Error: "config too large"}
+	if !wgKeyRe.MatchString(r.PeerPublicKey) {
+		return response{Error: "invalid peerPublicKey"}
 	}
+	if !ipv4CIDRRe.MatchString(r.Address) {
+		return response{Error: "invalid address"}
+	}
+	if !ipv4Re.MatchString(r.DNS) {
+		return response{Error: "invalid dns"}
+	}
+	if !ipv4PortRe.MatchString(r.PeerEndpoint) {
+		return response{Error: "invalid peerEndpoint"}
+	}
+	if !allowedIPsSet[r.PeerAllowedIPs] {
+		return response{Error: "invalid peerAllowedIPs"}
+	}
+	if !ipv4Re.MatchString(r.RelayIP) {
+		return response{Error: "invalid relayIP"}
+	}
+	if !ipv4Re.MatchString(r.Gateway) {
+		return response{Error: "invalid gateway"}
+	}
+
+	// Render the config from a fixed template. Every interpolation point is
+	// a value that has just passed a tight regex / set-membership check, so
+	// the resulting string cannot contain shell metacharacters or extra
+	// directives. PostUp/PreDown still execute under `wg-quick`'s shell,
+	// but their contents are entirely supervisor-controlled.
+	cfg := "[Interface]\n" +
+		"PrivateKey = " + r.PrivateKey + "\n" +
+		"Address = " + r.Address + "\n" +
+		"DNS = " + r.DNS + "\n" +
+		"Table = off\n" +
+		"PostUp = ip route add " + r.RelayIP + "/32 via " + r.Gateway +
+		" && ip route replace default dev " + wgInterface + "\n" +
+		"PreDown = ip route replace default via " + r.Gateway +
+		" ; ip route del " + r.RelayIP + "/32 via " + r.Gateway + "\n" +
+		"\n" +
+		"[Peer]\n" +
+		"PublicKey = " + r.PeerPublicKey + "\n" +
+		"AllowedIPs = " + r.PeerAllowedIPs + "\n" +
+		"Endpoint = " + r.PeerEndpoint + "\n"
 
 	if err := os.MkdirAll(r.ConfigDir, 0o700); err != nil {
 		return response{Error: "mkdir configDir: " + err.Error()}
 	}
 	configPath := filepath.Join(r.ConfigDir, wgInterface+".conf")
-	if err := os.WriteFile(configPath, []byte(r.Config), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(cfg), 0o600); err != nil {
 		return response{Error: "write config: " + err.Error()}
 	}
 

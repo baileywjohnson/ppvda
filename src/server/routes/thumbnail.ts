@@ -1,7 +1,9 @@
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
+import http from 'node:http';
+import https from 'node:https';
 import { spawnFfmpegStream } from '../../downloader/ffmpeg.js';
 import type { ProxyConfig } from '../../proxy/types.js';
-import { isPrivateUrl } from '../../utils/url.js';
+import { isPrivateUrl, pinnedLookup, safeResolveHost } from '../../utils/url.js';
 import { getHttpAgent } from '../../proxy/index.js';
 import { ffmpegRouteSem } from './ffmpeg-concurrency.js';
 
@@ -72,6 +74,13 @@ export async function thumbnailRoutes(
 
 /**
  * For images: fetch and proxy directly. Preserves original format.
+ *
+ * Uses Node's `http`/`https.request` rather than global `fetch` so we can
+ * supply a `lookup` function that returns a pre-validated address. This
+ * closes the DNS-rebinding window between the route-level `isPrivateUrl`
+ * check and the actual outbound connection — `fetch` (undici) does its
+ * own internal DNS resolution that can flip a public IP back to a
+ * private one between the two events.
  */
 async function handleImageProxy(
   url: string,
@@ -79,49 +88,86 @@ async function handleImageProxy(
   request: any,
   reply: any,
 ) {
-  try {
-    const fetchOpts: RequestInit = {
-      signal: AbortSignal.timeout(10000),
-    };
-    if (proxy) {
-      (fetchOpts as any).agent = getHttpAgent(proxy);
-    }
+  const parsed = (() => { try { return new URL(url); } catch { return null; } })();
+  if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+    reply.status(400).send({ success: false, error: 'Invalid URL' });
+    return;
+  }
 
-    const res = await fetch(url, fetchOpts);
-    if (!res.ok || !res.body) {
-      reply.status(404).send({ success: false, error: 'Could not fetch image' });
+  const agent = proxy ? getHttpAgent(proxy) : undefined;
+  let lookup: ReturnType<typeof pinnedLookup> | undefined;
+  if (!agent) {
+    const resolved = await safeResolveHost(parsed.hostname);
+    if (!resolved) {
+      reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
       return;
     }
+    lookup = pinnedLookup(resolved);
+  }
+  const mod = parsed.protocol === 'https:' ? https : http;
 
-    // Reject oversized responses to prevent OOM (10 MB limit)
-    const contentLength = parseInt(res.headers.get('content-length') ?? '0', 10);
-    if (contentLength > 10 * 1024 * 1024) {
-      reply.status(413).send({ success: false, error: 'Image too large' });
-      return;
-    }
+  const MAX_BYTES = 10 * 1024 * 1024;
 
-    const contentType = res.headers.get('content-type') ?? 'image/jpeg';
-    const maxBytes = 10 * 1024 * 1024;
-    const chunks: Buffer[] = [];
-    let totalBytes = 0;
-    // @ts-ignore
-    for await (const chunk of res.body) {
-      totalBytes += chunk.length;
-      if (totalBytes > maxBytes) {
-        reply.status(413).send({ success: false, error: 'Image too large' });
+  await new Promise<void>((resolve) => {
+    const req = mod.request(url, { method: 'GET', agent, lookup, timeout: 10000 }, (res) => {
+      // Block redirects: an attacker could redirect to a private host that
+      // the next DNS resolution might or might not catch. Easier to refuse.
+      if (!res.statusCode || res.statusCode >= 400 || (res.statusCode >= 300 && res.statusCode < 400)) {
+        res.resume();
+        reply.status(404).send({ success: false, error: 'Could not fetch image' });
+        resolve();
         return;
       }
-      chunks.push(Buffer.from(chunk));
-    }
-    const data = Buffer.concat(chunks);
 
-    reply
-      .header('Content-Type', contentType)
-      .header('Cache-Control', 'private, max-age=300')
-      .send(data);
-  } catch {
-    reply.status(404).send({ success: false, error: 'Could not fetch image' });
-  }
+      const contentLength = parseInt(String(res.headers['content-length'] ?? '0'), 10);
+      if (Number.isFinite(contentLength) && contentLength > MAX_BYTES) {
+        res.resume();
+        reply.status(413).send({ success: false, error: 'Image too large' });
+        resolve();
+        return;
+      }
+
+      const contentType = String(res.headers['content-type'] ?? 'image/jpeg');
+      const chunks: Buffer[] = [];
+      let totalBytes = 0;
+      let oversized = false;
+      res.on('data', (chunk: Buffer) => {
+        if (oversized) return;
+        totalBytes += chunk.length;
+        if (totalBytes > MAX_BYTES) {
+          oversized = true;
+          res.destroy();
+          reply.status(413).send({ success: false, error: 'Image too large' });
+          resolve();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on('end', () => {
+        if (oversized) return;
+        reply
+          .header('Content-Type', contentType)
+          .header('Cache-Control', 'private, max-age=300')
+          .send(Buffer.concat(chunks));
+        resolve();
+      });
+      res.on('error', () => {
+        if (oversized) return;
+        reply.status(404).send({ success: false, error: 'Could not fetch image' });
+        resolve();
+      });
+    });
+    req.on('error', () => {
+      reply.status(404).send({ success: false, error: 'Could not fetch image' });
+      resolve();
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      reply.status(504).send({ success: false, error: 'Image fetch timed out' });
+      resolve();
+    });
+    req.end();
+  });
 }
 
 /**

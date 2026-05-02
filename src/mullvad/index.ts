@@ -1,7 +1,6 @@
 import { generateWireGuardKeys } from './keys.js';
 import { getAccessToken, createDevice, removeDevice, listDevices, getRelayList, findRelay } from './api.js';
 import {
-  generateWgConfig,
   startTunnel,
   stopTunnel,
   getDefaultGateway,
@@ -92,9 +91,8 @@ export async function setupMullvad(
   // Ensure no stale tunnel from a previous crash/SIGKILL before starting
   try { await stopTunnel(config.configDir); } catch { /* may not exist — fine */ }
 
-  // Generate config and start tunnel
-  const wgConfig = generateWgConfig(device, server, gateway);
-  await startTunnel(config.configDir, wgConfig);
+  // Start the tunnel — the supervisor renders the config from typed fields.
+  await startTunnel(config.configDir, device, server, gateway);
 
   logger.info('WireGuard tunnel is up — all traffic routed through Mullvad');
 
@@ -171,8 +169,7 @@ export async function switchMullvadCountry(
     const { country, city, server } = findRelay(relays, location);
 
     // Start new tunnel
-    const wgConfig = generateWgConfig(activeDevice, server, gateway);
-    await startTunnel(activeConfig.configDir, wgConfig);
+    await startTunnel(activeConfig.configDir, activeDevice, server, gateway);
 
     // Update stored location
     activeConfig = { ...activeConfig, location };

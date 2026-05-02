@@ -171,7 +171,10 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
   await app.register(downloadRoutes, { ...routeOpts, preHandler: authAndVpn });
   await app.register(streamDownloadRoutes, { ...routeOpts, preHandler: authAndVpn });
   if (config.enableThumbnails) {
-    await app.register(thumbnailRoutes, { ...routeOpts, preHandler: authenticate });
+    // Gate behind authAndVpn — the thumbnail route fetches the source video
+    // server-side via ffmpeg, and that traffic must not leak the real IP if
+    // the WireGuard tunnel is degraded.
+    await app.register(thumbnailRoutes, { ...routeOpts, preHandler: authAndVpn });
   }
 
   // Global error handler

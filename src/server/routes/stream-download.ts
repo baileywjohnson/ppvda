@@ -1,6 +1,8 @@
 import { createReadStream } from 'node:fs';
 import { stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import http from 'node:http';
+import https from 'node:https';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { pipeline } from 'node:stream/promises';
 import { runFfmpeg } from '../../downloader/ffmpeg.js';
@@ -8,7 +10,7 @@ import { streamDownloadRequestSchema } from '../schemas/stream-download.js';
 import { generateId } from '../../utils/id.js';
 import { ensureDir, secureUnlink } from '../../utils/fs.js';
 import type { ProxyConfig } from '../../proxy/types.js';
-import { isPrivateUrl } from '../../utils/url.js';
+import { isPrivateUrl, pinnedLookup, safeResolveHost } from '../../utils/url.js';
 import { isVpnSwitching } from '../../mullvad/index.js';
 import { isDirectMediaUrl } from '../../extractor/patterns.js';
 import { resolveProxy, type VpnPermissionStore } from '../vpn-permissions.js';
@@ -99,6 +101,12 @@ export async function streamDownloadRoutes(
 
 /**
  * Image download: direct HTTP fetch, no ffmpeg. Preserves original format.
+ *
+ * Uses Node's `http`/`https.request` with a pre-resolved-and-validated
+ * `lookup` so the actual outbound connect uses the same address that
+ * passed our SSRF check. Going through global `fetch` (undici) would let
+ * its internal DNS resolution flip a public address to a private one
+ * between the route-level `isPrivateUrl` check and the connect.
  */
 async function handleImageDownload(
   url: string,
@@ -112,46 +120,79 @@ async function handleImageDownload(
   const safeName = sanitizeFilename(filename ?? 'image') + ext;
   const contentType = MIME_MAP[ext] ?? 'application/octet-stream';
 
-  try {
-    const fetchOpts: RequestInit & { dispatcher?: any } = {
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      },
-    };
-    // Use proxy agent if configured
-    if (proxy) {
-      const agent = getHttpAgent(proxy);
-      (fetchOpts as any).agent = agent;
-    }
+  const parsed = (() => { try { return new URL(url); } catch { return null; } })();
+  if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+    reply.status(400).send({ success: false, error: 'Invalid URL' });
+    return;
+  }
 
-    const res = await fetch(url, fetchOpts);
-    if (!res.ok || !res.body) {
-      reply.status(502).send({ success: false, error: 'Failed to download image' });
+  const agent = proxy ? getHttpAgent(proxy) : undefined;
+  let lookup: ReturnType<typeof pinnedLookup> | undefined;
+  if (!agent) {
+    const resolved = await safeResolveHost(parsed.hostname);
+    if (!resolved) {
+      reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
       return;
     }
-
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      'Content-Type': contentType,
-      'Content-Disposition': `attachment; filename="${safeName}"`,
-      ...(res.headers.get('content-length') ? { 'Content-Length': res.headers.get('content-length') } : {}),
-      'Cache-Control': 'no-store',
-    });
-
-    try {
-      // @ts-ignore - Node fetch body is a ReadableStream
-      for await (const chunk of res.body) {
-        reply.raw.write(chunk);
-      }
-    } catch {
-      // Client disconnected
-    } finally {
-      reply.raw.end();
-    }
-  } catch {
-    reply.status(502).send({ success: false, error: 'Failed to download image' });
+    lookup = pinnedLookup(resolved);
   }
+  const mod = parsed.protocol === 'https:' ? https : http;
+
+  await new Promise<void>((resolve) => {
+    const req = mod.request(
+      url,
+      {
+        method: 'GET',
+        agent,
+        lookup,
+        timeout: timeoutMs,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        },
+      },
+      (res) => {
+        // Redirects could point at a private host; refuse rather than
+        // re-validate per hop.
+        if (!res.statusCode || res.statusCode >= 400 || (res.statusCode >= 300 && res.statusCode < 400)) {
+          res.resume();
+          reply.status(502).send({ success: false, error: 'Failed to download image' });
+          resolve();
+          return;
+        }
+
+        const len = res.headers['content-length'];
+        reply.hijack();
+        reply.raw.writeHead(200, {
+          'Content-Type': contentType,
+          'Content-Disposition': `attachment; filename="${safeName}"`,
+          ...(len ? { 'Content-Length': String(len) } : {}),
+          'Cache-Control': 'no-store',
+        });
+
+        res.on('data', (chunk: Buffer) => {
+          reply.raw.write(chunk);
+        });
+        res.on('end', () => {
+          reply.raw.end();
+          resolve();
+        });
+        res.on('error', () => {
+          reply.raw.end();
+          resolve();
+        });
+      },
+    );
+    req.on('error', () => {
+      reply.status(502).send({ success: false, error: 'Failed to download image' });
+      resolve();
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      reply.status(504).send({ success: false, error: 'Image download timed out' });
+      resolve();
+    });
+    req.end();
+  });
 }
 
 /**

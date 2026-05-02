@@ -14,8 +14,17 @@ const MAX_FRAME_BYTES = 64 * 1024;
 export interface BringupRequest {
   op: 'BRINGUP';
   configDir: string;
-  config: string;
+  privateKey: string;
+  address: string;
+  dns: string;
+  peerPublicKey: string;
+  peerEndpoint: string;
+  peerAllowedIPs: string;
+  relayIP: string;
+  gateway: string;
 }
+
+export type BringupArgs = Omit<BringupRequest, 'op'>;
 
 export interface TeardownRequest {
   op: 'TEARDOWN';
@@ -109,8 +118,8 @@ async function call(req: Request): Promise<unknown> {
   });
 }
 
-export async function rpcBringup(configDir: string, config: string): Promise<void> {
-  await call({ op: 'BRINGUP', configDir, config });
+export async function rpcBringup(args: BringupArgs): Promise<void> {
+  await call({ op: 'BRINGUP', ...args });
 }
 
 export async function rpcTeardown(configDir: string): Promise<void> {
