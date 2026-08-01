@@ -26,6 +26,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -50,8 +51,23 @@ const (
 	maxFrameBytes    = 64 * 1024
 	subprocessTimeout = 30 * time.Second
 	defaultSocketPath = "/run/ppvda/wg.sock"
+	defaultConfigDir  = "/app/mullvad"
 	wgInterface       = "wg0"
 )
+
+// configDir is the ONLY directory the supervisor will write a WireGuard
+// config into. It is fixed at startup rather than taken from the RPC
+// payload: accepting a caller-supplied path gave any process running as the
+// ppvda uid an arbitrary root-owned MkdirAll plus a write of <dir>/wg0.conf.
+// The file content was always supervisor-rendered so that was not a code-
+// execution path, but it was a privilege the split exists to deny.
+//
+// Pinning it also removes a live failure mode: PPVDA's default
+// MULLVAD_CONFIG_DIR is the *relative* "./mullvad" (src/config.ts,
+// .env.example) and was forwarded verbatim, so any deployment that didn't
+// override it — i.e. the manual Docker path in the README — failed BRINGUP
+// with "configDir must be an absolute path".
+var configDir = defaultConfigDir
 
 type request struct {
 	Op string `json:"op"`
@@ -109,7 +125,13 @@ var (
 func main() {
 	socketPath := flag.String("socket", defaultSocketPath, "path to the Unix socket PPVDA will connect to")
 	allowUIDStr := flag.String("uid", "", "numeric uid permitted to connect (required)")
+	configDirFlag := flag.String("config-dir", defaultConfigDir, "the only directory wg0.conf may be written to")
 	flag.Parse()
+
+	if !filepath.IsAbs(*configDirFlag) {
+		log.Fatalf("-config-dir %q must be an absolute path", *configDirFlag)
+	}
+	configDir = filepath.Clean(*configDirFlag)
 
 	if *allowUIDStr == "" {
 		log.Fatal("-uid is required (the ppvda user's uid)")
@@ -243,8 +265,10 @@ func dispatch(r request) response {
 // be an absolute path; we don't tolerate relative paths because they
 // would be resolved against the supervisor's cwd, not PPVDA's.
 func doBringup(r request) response {
-	if r.ConfigDir == "" || !filepath.IsAbs(r.ConfigDir) {
-		return response{Error: "configDir must be an absolute path"}
+	// r.ConfigDir is accepted for wire compatibility but deliberately ignored
+	// in favour of the pinned `configDir` — see the comment on that var.
+	if r.ConfigDir != "" && filepath.Clean(r.ConfigDir) != configDir {
+		log.Printf("ignoring caller configDir %q; using pinned %q", r.ConfigDir, configDir)
 	}
 	if !wgKeyRe.MatchString(r.PrivateKey) {
 		return response{Error: "invalid privateKey"}
@@ -291,10 +315,10 @@ func doBringup(r request) response {
 		"AllowedIPs = " + r.PeerAllowedIPs + "\n" +
 		"Endpoint = " + r.PeerEndpoint + "\n"
 
-	if err := os.MkdirAll(r.ConfigDir, 0o700); err != nil {
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return response{Error: "mkdir configDir: " + err.Error()}
 	}
-	configPath := filepath.Join(r.ConfigDir, wgInterface+".conf")
+	configPath := filepath.Join(configDir, wgInterface+".conf")
 	if err := os.WriteFile(configPath, []byte(cfg), 0o600); err != nil {
 		return response{Error: "write config: " + err.Error()}
 	}
@@ -317,10 +341,9 @@ func doBringup(r request) response {
 // WireGuard private key). Best-effort throughout — the tunnel may already
 // be down from a prior country-switch.
 func doTeardown(r request) response {
-	if r.ConfigDir == "" || !filepath.IsAbs(r.ConfigDir) {
-		return response{Error: "configDir must be an absolute path"}
-	}
-	configPath := filepath.Join(r.ConfigDir, wgInterface+".conf")
+	// Same as doBringup: the caller's configDir is ignored in favour of the
+	// pinned one, so teardown always targets the file we actually wrote.
+	configPath := filepath.Join(configDir, wgInterface+".conf")
 
 	// Ignore errors — tunnel may not exist
 	_, _ = runCmd("wg-quick", "down", configPath)
@@ -451,6 +474,11 @@ func secureUnlink(path string) {
 	}
 	defer f.Close()
 	buf := make([]byte, 4096)
+	if _, err := rand.Read(buf); err != nil {
+		// Fall back to the zero buffer — still destroys the key material,
+		// which is the property we actually need here.
+		clear(buf)
+	}
 	remaining := stat.Size()
 	for remaining > 0 {
 		n := int64(len(buf))

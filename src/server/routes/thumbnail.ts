@@ -205,6 +205,12 @@ async function handleVideoThumbnail(
       ],
     });
 
+    // Register the disconnect handler BEFORE awaiting ffmpeg. Attaching it
+    // afterwards meant a client that hung up mid-generation left ffmpeg (and
+    // its SSRF proxy) running until the 15s timeout, holding a semaphore slot
+    // the whole time.
+    request.raw.on('close', () => kill());
+
     const MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024; // 5 MB — a single JPEG frame is ~50-200 KB
     const chunks: Buffer[] = [];
     let totalBytes = 0;
@@ -232,8 +238,6 @@ async function handleVideoThumbnail(
       });
       proc.on('error', () => resolve(null));
     });
-
-    request.raw.on('close', () => kill());
 
     if (result) {
       reply

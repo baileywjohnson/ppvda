@@ -32,6 +32,9 @@ export interface DarkreelDelegationRow {
   public_key: Buffer;             // 32-byte raw X25519 pubkey
   encrypted_refresh_token: Buffer; // AES-GCM(PPVDA master key, AAD=userID)
   refresh_token_nonce: Buffer;
+  /** Year-week precision (`strftime('%Y-%W')`), matching every other table.
+   *  Full timestamps here would let anyone who reads the DB pin down exactly
+   *  when a Darkreel account was linked. */
   connected_at: string;
 }
 
@@ -266,7 +269,7 @@ export class DB {
         public_key, encrypted_refresh_token, refresh_token_nonce,
         connected_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%W', 'now'))
       ON CONFLICT(user_id) DO UPDATE SET
         server_url = excluded.server_url,
         darkreel_user_id = excluded.darkreel_user_id,
@@ -274,7 +277,7 @@ export class DB {
         public_key = excluded.public_key,
         encrypted_refresh_token = excluded.encrypted_refresh_token,
         refresh_token_nonce = excluded.refresh_token_nonce,
-        connected_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        connected_at = strftime('%Y-%W', 'now')
     `).run(
       opts.userId, opts.serverUrl, opts.darkreelUserId, opts.delegationId,
       opts.publicKey, opts.encryptedRefreshToken, opts.refreshTokenNonce,

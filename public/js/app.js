@@ -887,11 +887,15 @@
     return null;
   }
 
+  // textContent -> innerHTML escapes < > &, but NOT quotes. Several call sites
+  // interpolate into double-quoted attributes (e.g. class="badge-${esc(...)}"),
+  // where an unescaped " would break out of the attribute. Escape both quote
+  // characters explicitly so esc() is safe in attribute context too.
   function esc(str) {
     if (!str) return '';
     const d = document.createElement('div');
     d.textContent = str;
-    return d.innerHTML;
+    return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   function formatSize(bytes) {
