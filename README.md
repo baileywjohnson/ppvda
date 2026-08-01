@@ -120,7 +120,7 @@ Takes about 5 minutes. When it's done you'll see:
 | **SSH hardening** | Optional personal user with sudo, root login disabled |
 | **Docker** | Docker + Compose installed and enabled |
 | **Application** | PPVDA container with Chromium, ffmpeg, WireGuard |
-| **Reverse proxy** | Caddy with automatic Let's Encrypt TLS (if domain provided) |
+| **Reverse proxy** | Caddy, always installed. With a domain: automatic Let's Encrypt TLS. Without one: plain HTTP on :80. The app itself binds loopback only, so Caddy is the sole ingress and UFW actually governs the exposed port. |
 | **Access log privacy** | Optional: Caddy access logs discarded (no IP/URL logging) |
 | **VPN** | Mullvad WireGuard tunnel (if account provided) |
 | **Database backups** | Daily encrypted backup at 3 AM (AES-256-CBC, 30-day retention) |
@@ -150,6 +150,8 @@ docker compose up --build -d
 ```
 
 Open `http://localhost:3000` and log in. The container includes ffmpeg, Chromium, and WireGuard tools.
+
+> The container publishes port 3000 on **loopback only**. That is deliberate: Docker's published ports are handled by its own iptables chain, which is evaluated before UFW's rules, so a `0.0.0.0` bind would be reachable from the internet even with `ufw deny 3000`. To reach PPVDA from another machine, put a reverse proxy in front of it (`./setup.sh` installs and configures Caddy for you) rather than changing this binding.
 
 ### Without Docker
 

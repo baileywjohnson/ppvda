@@ -391,38 +391,66 @@ info ".env generated with secure JWT secret (mode 600)"
 # CADDY (REVERSE PROXY + TLS)
 # ============================================================
 
-if [ -n "$DOMAIN" ]; then
-  if ! command -v caddy &>/dev/null; then
-    info "Installing Caddy..."
-    apt-get update -qq
-    apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null
-    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-    echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" > /etc/apt/sources.list.d/caddy-stable.list
-    apt-get update -qq
-    apt-get install -y -qq caddy >/dev/null
-    info "Caddy installed"
-  fi
+# Caddy is now installed unconditionally, not just when a domain is given.
+#
+# The container binds 127.0.0.1:3000 (docker-compose.yml), so Caddy is the
+# ONLY path to the app. Previously the container published 0.0.0.0:3000 and
+# we relied on UFW to keep it private — but Docker's iptables rules live in
+# the DOCKER chain, which is traversed *before* UFW's filter rules, so a
+# published port bypasses UFW entirely. On a domain-less install the setup
+# script even printed http://<public-ip>:3000 as the access URL, i.e. the
+# login endpoint (which receives the plaintext password) was reachable over
+# unencrypted HTTP from anywhere.
+#
+# With a domain: Caddy terminates TLS via Let's Encrypt as before.
+# Without one: Caddy serves plain HTTP on :80, which UFW *does* govern.
+# That is not encrypted — same as the old behavior — but the port is now
+# firewall-controlled and there is a single place to add TLS later.
+if ! command -v caddy &>/dev/null; then
+  info "Installing Caddy..."
+  apt-get update -qq
+  apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null
+  curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" > /etc/apt/sources.list.d/caddy-stable.list
+  apt-get update -qq
+  apt-get install -y -qq caddy >/dev/null
+  info "Caddy installed"
+fi
 
-  if [ "$DISABLE_ACCESS_LOGS" = "y" ]; then
-    cat > /etc/caddy/Caddyfile <<EOF
-${DOMAIN} {
+# Site address: the domain (Caddy auto-provisions TLS) or :80 for the
+# domain-less install.
+if [ -n "$DOMAIN" ]; then
+  CADDY_SITE="${DOMAIN}"
+else
+  CADDY_SITE=":80"
+fi
+
+if [ "$DISABLE_ACCESS_LOGS" = "y" ]; then
+  cat > /etc/caddy/Caddyfile <<EOF
+${CADDY_SITE} {
     reverse_proxy localhost:3000
     log {
         output discard
     }
 }
 EOF
-    info "Caddy configured for $DOMAIN (HTTPS, access logs disabled for privacy)"
-  else
-    cat > /etc/caddy/Caddyfile <<EOF
-${DOMAIN} {
+  LOG_NOTE="access logs disabled for privacy"
+else
+  cat > /etc/caddy/Caddyfile <<EOF
+${CADDY_SITE} {
     reverse_proxy localhost:3000
 }
 EOF
-    info "Caddy configured for $DOMAIN (HTTPS, access logs enabled)"
-  fi
-  systemctl restart caddy
+  LOG_NOTE="access logs enabled"
 fi
+
+if [ -n "$DOMAIN" ]; then
+  info "Caddy configured for $DOMAIN (HTTPS, $LOG_NOTE)"
+else
+  warn "No domain given — Caddy is serving plain HTTP on :80 (no TLS, $LOG_NOTE)."
+  warn "Credentials will cross the network unencrypted. Re-run with a domain, or put this host behind a VPN/SSH tunnel."
+fi
+systemctl restart caddy
 
 # ============================================================
 # DATABASE BACKUPS (daily, encrypted, 30-day retention)
@@ -505,7 +533,8 @@ if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
   if [ -n "$DOMAIN" ]; then
     echo -e "  ${BOLD}URL:${NC}       https://${DOMAIN}"
   else
-    echo -e "  ${BOLD}URL:${NC}       http://$(hostname -I | awk '{print $1}'):3000"
+    # Port 80 via Caddy, not 3000 — the container is loopback-bound now.
+    echo -e "  ${BOLD}URL:${NC}       http://$(hostname -I | awk '{print $1}')"
   fi
   echo -e "  ${BOLD}Username:${NC}  ${ADMIN_USER}"
   echo ""
