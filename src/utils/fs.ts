@@ -36,7 +36,7 @@ const OVERWRITE_CHUNK = 64 * 1024; // 64 KB
  *   - Journald / any log-structured FS retains historical page contents.
  *
  * See SECURITY.md ("Temp-file plaintext at rest") for the recommended
- * deployment setup — tmpfs for TEMP_DIR plus full-disk encryption is the
+ * deployment setup — a tmpfs-backed DOWNLOAD_DIR plus full-disk encryption is the
  * posture that actually delivers the property users might read into the
  * function name. On ext4 over a LUKS-encrypted rotational disk, this
  * overwrite is meaningful; elsewhere it's a defence-in-depth speed bump.
