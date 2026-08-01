@@ -69,7 +69,11 @@ Downloaded video files live briefly in `DOWNLOAD_DIR` (default `./downloads/`) a
 To actually get forensic resistance on the temp-file surface, you need **full-disk encryption plus an ephemeral tmpfs**:
 
 1. Run the host/container on LUKS / FileVault / encrypted EBS (also covers the SQLite DB — see above).
-2. Set `TEMP_DIR=/dev/shm/ppvda-tmp` (or a tmpfs bind-mount in the Docker compose), which backs the download directory with RAM. Files never touch disk at all; on reboot everything is gone regardless of the overwrite pass.
+2. Point `DOWNLOAD_DIR` at a tmpfs — e.g. `DOWNLOAD_DIR=/dev/shm/ppvda-downloads`, or a tmpfs mount for `/app/downloads` in `docker-compose.yml`. That backs both the finished-download directory and the `.tmp` staging directory inside it with RAM, so files never touch disk and are gone on reboot regardless of the overwrite pass.
+
+   Note that `/stream-download` stages its remuxed output in a sibling `tmp/` directory (`$DOWNLOAD_DIR/../tmp`), so a complete tmpfs posture needs that path covered too.
+
+   > Earlier revisions of this document recommended a `TEMP_DIR` environment variable. **No such variable exists** — PPVDA reads `DOWNLOAD_DIR` only, and setting `TEMP_DIR` silently does nothing. Use the settings above instead.
 
 Without FDE, treat `secureUnlink` as a defence-in-depth speed bump against naïve disk recovery, not a forensic guarantee. The function is useful on ext4/xfs over a LUKS-encrypted rotational disk; on most other deployments its security contribution is marginal.
 
@@ -79,7 +83,7 @@ Email **baileywjohnson@gmail.com** with details. Please do not open a public iss
 
 ## Supported versions
 
-Only `main` is supported. The deploy workflow ships the latest commit to production on every push to `main`; older commits are unsupported.
+Only `main` is supported; older commits are unsupported. There is no automated deploy — operators pull and rebuild (`git pull && docker compose up --build -d`, or `./update.sh`).
 
 ## Dependency hygiene
 

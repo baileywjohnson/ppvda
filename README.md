@@ -76,7 +76,7 @@ Typical setup: PPVDA runs on a privacy-friendly VPS behind a VPN. Darkreel runs 
 | Direct (`.mp4`, `.webm`, etc.) | HTTP fetch |
 | Image | Direct HTTP fetch |
 
-Browser downloads use fragmented MP4 (`frag_keyframe+empty_moov`) piped through ffmpeg to stdout — no temp file, modified hash. Disk downloads use `faststart` for optimal playback.
+Browser downloads (`/stream-download`) remux to fragmented MP4 (`frag_keyframe+empty_moov`), which changes the file hash relative to the original. The remuxed output is written to `tmp/` for the duration of the response, streamed to the client, then overwritten with random bytes and unlinked — it is not retained after the request. Job-pipeline downloads follow the same fragmentation, then encrypt and upload before the local copy is securely deleted.
 
 ### Job pipeline
 
@@ -290,7 +290,7 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
 - **VPN bypass validation** — Hostnames and IPs in `VPN_BYPASS_HOSTS` validated before writing to system routes and `/etc/hosts`
 - **No request logging** — URLs never appear in server logs. Rate limiting and session state are in-memory only and cleared on restart
 - **Coarsened timestamps** — Database timestamps use year-week precision (`strftime('%Y-%W')`) matching Darkreel's approach. In-memory job timestamps rounded to the minute
-- **Secure file deletion** — Downloaded media files overwritten with random data and fsynced before unlinking. **Caveat:** this is a defense-in-depth pass, not a forensic guarantee on modern filesystems — CoW (Btrfs/ZFS/APFS) and SSD wear-levelling mean the overwrite may not reach the original blocks. See [SECURITY.md](./SECURITY.md) for the recommended tmpfs-backed `TEMP_DIR` + full-disk-encryption posture
+- **Secure file deletion** — Downloaded media files overwritten with random data and fsynced before unlinking. **Caveat:** this is a defense-in-depth pass, not a forensic guarantee on modern filesystems — CoW (Btrfs/ZFS/APFS) and SSD wear-levelling mean the overwrite may not reach the original blocks. See [SECURITY.md](./SECURITY.md) for the recommended tmpfs-backed `DOWNLOAD_DIR` + full-disk-encryption posture
 - **WAL hygiene** — SQLite WAL files checkpointed and truncated every 5 minutes and on shutdown; `PRAGMA secure_delete = ON` zeroes deleted row contents before the page is reused, so revoked Darkreel delegations and expired sessions don't linger in page slack
 - **DNS privacy** — When Mullvad VPN is active, DNS queries route through the WireGuard tunnel
 - **Memory security** — Master keys, derived keys, and passwords zeroed from memory immediately after use. Session cleanup runs every 60 seconds
