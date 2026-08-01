@@ -19,7 +19,6 @@ import { JobStore } from '../jobs/store.js';
 import { createPipeline } from '../jobs/pipeline.js';
 import { healthRoutes } from './routes/health.js';
 import { extractRoutes } from './routes/extract.js';
-import { downloadRoutes } from './routes/download.js';
 import { jobRoutes } from './routes/jobs.js';
 import { streamDownloadRoutes } from './routes/stream-download.js';
 import { thumbnailRoutes } from './routes/thumbnail.js';
@@ -89,6 +88,7 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
   // SPA fallback — serve index.html for non-API, non-file routes
   app.setNotFoundHandler((request, reply) => {
     if (request.url.startsWith('/api/') || request.url.startsWith('/auth/') || request.url.startsWith('/jobs')
+      || request.url.startsWith('/download')
       || request.url.startsWith('/stream-download') || request.url.startsWith('/thumbnail')
       || request.url.startsWith('/config') || request.url.startsWith('/admin') || request.url.startsWith('/settings')
       || request.url.startsWith('/extract')) {
@@ -168,7 +168,6 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
   await app.register(settingsRoutes, { db, sessions, preHandler: authenticate });
   await app.register(jobRoutes, { store: jobStore, pipeline, preHandler: authenticate });
   await app.register(extractRoutes, { ...routeOpts, preHandler: authAndVpn });
-  await app.register(downloadRoutes, { ...routeOpts, preHandler: authAndVpn });
   await app.register(streamDownloadRoutes, { ...routeOpts, preHandler: authAndVpn });
   if (config.enableThumbnails) {
     // Gate behind authAndVpn — the thumbnail route fetches the source video

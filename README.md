@@ -32,7 +32,7 @@
 - **Web UI** — Paste a URL, see extracted videos, download to your browser or upload to Darkreel
 - **Progressive extraction** — Video sources stream to the UI as they're discovered via Server-Sent Events (~2-3 seconds for first results)
 - **Video metadata** — Duration, resolution, and file size probed in real time via ffprobe
-- **Streaming download** — Videos pipe through ffmpeg directly to your browser. No temp files on the server, and the downloaded file has a different hash from the original
+- **Streaming download** — Videos pipe through ffmpeg to your browser. The remuxed file is staged in `tmp/` only for the duration of the response, then securely overwritten and unlinked; the downloaded file has a different hash from the original
 - **Ad filtering** — Built-in blocklist of ~28 ad-tech domains, plus size/duration filtering
 - **Darkreel integration** — Background jobs: download, encrypt in-process (X25519 sealed-box to your Darkreel public key), upload to your encrypted library, securely delete local file. PPVDA never holds your Darkreel password — connect once via a copy-paste authorization code and revoke anytime from Darkreel's Connected Apps panel
 - **Mullvad VPN** — Built-in WireGuard tunnel. All extraction and download traffic routes through Mullvad with country switching from the admin panel
@@ -233,7 +233,7 @@ sudo ./update.sh --uninstall  # remove cron
 | Data | Retained? | Notes |
 |------|-----------|-------|
 | Video URLs | No | Only in browser memory during extraction |
-| Downloaded files | No | Securely overwritten and deleted after job completion |
+| Downloaded files | No | Securely overwritten and deleted after job completion. No endpoint leaves media on disk past the request that created it. |
 | Download history | No | Job metadata cleared from memory when jobs finish |
 | Darkreel delegation (refresh token + public key) | Encrypted at rest | AES-256-GCM with AAD, per-user master key. Passwords are never stored — see "Darkreel integration" below. |
 | Usernames | Yes (plaintext) | Use non-identifying usernames |
@@ -375,7 +375,6 @@ All endpoints except `/health`, `/auth/login`, `/auth/register`, `/auth/recover`
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/stream-download` | Stream video through ffmpeg to browser |
-| POST | `/download` | Download video to server disk |
 
 ### Jobs
 
