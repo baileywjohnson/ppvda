@@ -39,8 +39,11 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
     // see SECURITY.md) always routes requests through the Docker bridge gateway
     // (172.16.0.0/12) after terminating TLS at Caddy on loopback. This lets the
     // rate limiter see the real client IP from X-Forwarded-For rather than
-    // bucketing all traffic under one proxy address. Public-facing port 3000
-    // is firewalled by the setup script, so this cannot be abused externally.
+    // bucketing all traffic under one proxy address. The container publishes
+    // 3000 on loopback only (docker-compose.yml) so the port is unreachable
+    // off-host and this cannot be abused externally — note that UFW alone
+    // would NOT provide that property, because Docker's iptables rules are
+    // evaluated before UFW's.
     trustProxy: 'loopback, uniquelocal',
   });
 

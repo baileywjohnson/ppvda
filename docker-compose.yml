@@ -3,7 +3,11 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      # Loopback-only. Docker publishes ports via its own iptables chain,
+      # which is evaluated BEFORE UFW's rules — "0.0.0.0:3000" would be
+      # reachable from the internet even with `ufw deny 3000`. Caddy (see
+      # setup.sh) is the only intended ingress and proxies to localhost:3000.
+      - "127.0.0.1:3000:3000"
     env_file:
       - .env
     volumes:
