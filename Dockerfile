@@ -1,5 +1,5 @@
 # --- Node base ---
-FROM node:20-bookworm-slim AS base
+FROM node:22-bookworm-slim AS base
 
 # Install ffmpeg, WireGuard tools, gosu (for privilege dropping)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -14,9 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Playwright Chromium
+# Playwright pins an exact Chromium revision per release, so the browser must be
+# installed by the SAME playwright version the app imports. Installing it here
+# with a hardcoded version silently drifted from the lockfile; the download now
+# happens in the runtime stage using the resolved node_modules copy.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN npx -y playwright@1.59.1 install --with-deps chromium
 
 WORKDIR /app
 
@@ -52,6 +54,13 @@ WORKDIR /app
 # DRK_BINARY_PATH env var it exposed (dead-code attack surface).
 
 COPY --from=deps /app/node_modules ./node_modules
+
+# Install Chromium with the exact playwright build that ships in node_modules,
+# so the revision the library looks for is the revision that is on disk. Runs
+# as root (still pre-USER-drop) because --with-deps apt-installs system libs.
+RUN ./node_modules/.bin/playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /app/dist ./dist
 COPY --from=wg-supervisor-build /wg-supervisor /usr/local/bin/wg-supervisor
 RUN chmod 0755 /usr/local/bin/wg-supervisor
