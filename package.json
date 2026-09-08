@@ -21,18 +21,18 @@
     "argon2": "^0.45.1",
     "better-sqlite3": "^13.0.3",
     "dotenv": "^17.4.2",
-    "fastify": "^5.12.1",
+    "fastify": "^5.12.3",
     "https-proxy-agent": "^9.1.0",
-    "jose": "^6.2.10",
+    "jose": "^6.2.12",
     "nanoid": "^6.0.1",
     "pino": "^10.3.1",
-    "playwright": "^1.62.1",
+    "playwright": "^1.63.0",
     "socks-proxy-agent": "^10.1.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
-    "@types/node": "^26.4.0",
-    "tsx": "^4.23.12",
+    "@types/node": "^26.4.1",
+    "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }
 }
