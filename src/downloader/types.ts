@@ -7,6 +7,8 @@ export interface DownloadOptions {
   filename?: string;
   timeoutMs?: number;
   maxBytes?: number;
+  /** Cap on HLS/DASH output duration; live streams are refused outright. */
+  maxDurationSec?: number;
 }
 
 export interface DownloadResult {

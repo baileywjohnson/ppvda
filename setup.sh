@@ -7,20 +7,23 @@
 #   2. Configures UFW firewall (SSH, HTTP, HTTPS only)
 #   3. Installs fail2ban and enables automatic security updates
 #   4. Optionally creates a personal SSH user and disables root login
-#   5. Installs Docker and Docker Compose (if not present)
-#   6. Clones the repo (or uses the current directory)
+#   5. Installs Docker and Docker Compose from Docker's signed apt repository
+#      (if not present)
+#   6. Clones the repo (or uses the current directory) and checks out the
+#      newest release tag signed by the pinned release signer
 #   7. Generates a secure .env configuration
 #   8. Optionally configures Mullvad VPN
 #   9. Sets up Caddy for automatic HTTPS (with optional access log privacy)
 #   10. Sets up daily encrypted database backups
 #   11. Builds and starts everything with docker compose
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/baileywjohnson/ppvda/main/setup.sh | bash
-#
-# Or clone first and run locally:
+# Usage — clone, check out and verify a signed release, read the script,
+# then run it (it runs as root, so don't pipe it from the network into a
+# shell; its prompts also need a terminal on stdin):
 #   git clone https://github.com/baileywjohnson/ppvda.git
 #   cd ppvda
+#   git checkout vX.Y.Z   # newest release; verify it, see README "Deploy"
+#   less setup.sh
 #   sudo ./setup.sh
 #
 set -euo pipefail
@@ -40,6 +43,16 @@ error() { echo -e "${RED}[x]${NC} $1"; exit 1; }
 if [ "$(id -u)" -ne 0 ]; then
   error "This script must be run as root (use sudo ./setup.sh)"
 fi
+
+# The prompts below read from stdin. Piped in (`curl … | bash`) they would
+# consume the rest of the script as answers.
+if [ ! -t 0 ]; then
+  error "Run this script from a file with a terminal on stdin (sudo ./setup.sh), not piped into a shell"
+fi
+
+ALLOWED_SIGNERS="/etc/ppvda/allowed_signers"
+# Docker's apt repository signing key (docs.docker.com/engine/install).
+DOCKER_GPG_FPR="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 
 # --- Gather input ---
 echo -e "${BOLD}PPVDA Setup${NC}"
@@ -105,9 +118,28 @@ if [ -n "$DOMAIN" ]; then
   [ "$DISABLE_ACCESS_LOGS_INPUT" = "n" ] || [ "$DISABLE_ACCESS_LOGS_INPUT" = "N" ] && DISABLE_ACCESS_LOGS="n"
 fi
 
+# Releases are SSH-signed git tags. Pinning the signer's public key lets this
+# script build the newest signed release instead of whatever the branch head
+# is, and is what update.sh verifies against.
+RELEASE_SIGNER_KEY=""
+if [ ! -f "$ALLOWED_SIGNERS" ]; then
+  echo ""
+  echo "Release signer SSH public key (e.g. ssh-ed25519 AAAA...), obtained from the"
+  while true; do
+    read -rp "maintainer through a channel you trust — or leave empty to skip: " RELEASE_SIGNER_KEY
+    if [ -z "$RELEASE_SIGNER_KEY" ] || [[ "$RELEASE_SIGNER_KEY" =~ ^(ssh-ed25519|sk-ssh-ed25519@openssh\.com|ecdsa-sha2-nistp(256|384|521)|ssh-rsa)\ [A-Za-z0-9+/]+=*(\ .*)?$ ]]; then
+      break
+    fi
+    warn "That doesn't look like an SSH public key."
+  done
+fi
+
 AUTO_UPDATE="n"
 echo ""
-read -rp "Enable auto-updates? (daily check for new releases) [y/N]: " AUTO_UPDATE
+read -rp "Enable auto-updates? (daily check for new signed releases) [y/N]: " AUTO_UPDATE
+if { [ "$AUTO_UPDATE" = "y" ] || [ "$AUTO_UPDATE" = "Y" ]; } && [ ! -f "$ALLOWED_SIGNERS" ] && [ -z "$RELEASE_SIGNER_KEY" ]; then
+  warn "Auto-updates only deploy tags signed by a pinned signer; with none pinned they will refuse to run."
+fi
 
 echo ""
 info "Admin user:  $ADMIN_USER"
@@ -277,6 +309,11 @@ info "Deploy script installed with restricted sudo"
 
 # --- Install signing public key directory ---
 mkdir -p /etc/ppvda
+if [ -n "$RELEASE_SIGNER_KEY" ]; then
+  echo "release-signer ${RELEASE_SIGNER_KEY}" > "$ALLOWED_SIGNERS"
+  chmod 644 "$ALLOWED_SIGNERS"
+  info "Release signer pinned at $ALLOWED_SIGNERS"
+fi
 if [ ! -f /etc/ppvda/signing.pub ]; then
   warn "No signing public key found at /etc/ppvda/signing.pub"
   warn "CI/CD signature verification will be skipped without it."
@@ -290,9 +327,41 @@ fi
 # ============================================================
 
 # --- Install Docker ---
+# From Docker's own apt repository, with its signing key checked against the
+# published fingerprint — not `curl https://get.docker.com | sh`, which runs
+# whatever that URL serves as root. After this, apt verifies every package.
+install_docker() {
+  local os_id codename key_tmp fpr
+  os_id=$(. /etc/os-release && echo "${ID:-}")
+  codename=$(. /etc/os-release && echo "${VERSION_CODENAME:-}")
+  case "$os_id" in
+    ubuntu|debian) ;;
+    *) error "Automatic Docker install supports Debian and Ubuntu only. Install Docker Engine and the Compose plugin (https://docs.docker.com/engine/install/), then re-run." ;;
+  esac
+  [ -n "$codename" ] || error "Could not determine the ${os_id} release codename from /etc/os-release"
+
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl gnupg >/dev/null
+  install -m 0755 -d /etc/apt/keyrings
+  key_tmp=$(mktemp)
+  curl -fsSL "https://download.docker.com/linux/${os_id}/gpg" -o "$key_tmp"
+  fpr=$(gpg --batch --with-colons --show-keys "$key_tmp" 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')
+  if [ "$fpr" != "$DOCKER_GPG_FPR" ]; then
+    rm -f "$key_tmp"
+    error "Docker's apt signing key has fingerprint '${fpr}', expected ${DOCKER_GPG_FPR} — aborting"
+  fi
+  gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg "$key_tmp"
+  rm -f "$key_tmp"
+  chmod a+r /etc/apt/keyrings/docker.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${os_id} ${codename} stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null
+}
+
 if ! command -v docker &>/dev/null; then
-  info "Installing Docker..."
-  curl -fsSL https://get.docker.com | sh
+  info "Installing Docker from Docker's apt repository..."
+  install_docker
   systemctl enable --now docker
   info "Docker installed"
 else
@@ -309,13 +378,45 @@ if [ -f "docker-compose.yml" ] && [ -f "Dockerfile" ]; then
   info "Using current directory as source"
   REPO_DIR="$(pwd)"
 elif [ -d "$REPO_DIR" ]; then
-  info "Updating existing repo at $REPO_DIR"
-  cd "$REPO_DIR" && git pull --quiet
+  info "Using existing repo at $REPO_DIR"
 else
   info "Cloning PPVDA..."
   git clone --quiet https://github.com/baileywjohnson/ppvda.git "$REPO_DIR"
 fi
 cd "$REPO_DIR"
+
+# --- Check out the newest signed release ---
+# Same trust model as update.sh: only a vX.Y.Z tag whose SSH signature
+# verifies against $ALLOWED_SIGNERS counts as a release. Building the branch
+# head would run whatever was last pushed, as root.
+select_release() {
+  local tag
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    warn "$REPO_DIR is not a git checkout — building it as is, UNVERIFIED."
+    return
+  fi
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    warn "$REPO_DIR has local changes — building the working tree as is, UNVERIFIED."
+    return
+  fi
+  git fetch --quiet --force --tags origin || warn "Could not fetch release tags from origin"
+  if [ ! -f "$ALLOWED_SIGNERS" ] || [ -L "$ALLOWED_SIGNERS" ]; then
+    warn "No release signer pinned at $ALLOWED_SIGNERS, so nothing can be verified."
+    warn "Building $(git rev-parse --short HEAD) UNVERIFIED. To fix: pin the signer (see update.sh) and re-run."
+    return
+  fi
+  for tag in $(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true); do
+    if git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$ALLOWED_SIGNERS" \
+         verify-tag "$tag" >/dev/null 2>&1; then
+      git checkout --quiet --detach "${tag}^{commit}"
+      info "Building signed release $tag ($(git rev-parse --short HEAD))"
+      return
+    fi
+  done
+  warn "No release tag signed by the pinned signer exists yet."
+  warn "Building $(git rev-parse --abbrev-ref HEAD) at $(git rev-parse --short HEAD) UNVERIFIED; update.sh moves to the first signed release that descends from it."
+}
+select_release
 
 # --- Create directories ---
 mkdir -p data downloads
@@ -520,22 +621,62 @@ fi
 info "Building and starting PPVDA (this takes a few minutes on first run)..."
 docker compose up --build -d
 
+wait_healthy() {
+  local i
+  for i in $(seq 1 "$1"); do
+    if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+# The admin password reaches the container as an environment variable, so it
+# is part of that container's configuration (`docker inspect`,
+# /var/lib/docker/containers/<id>/config.v2.json) for as long as the container
+# exists — shredding bootstrap.env alone doesn't remove it, and while the
+# override file exists every `docker compose up` re-applies it. Once the
+# admin account exists: shred the file, drop the override, and recreate the
+# container from .env alone.
+BOOTSTRAP_CLEANUP="cd $(printf '%q' "$REPO_DIR") && { shred -u bootstrap.env 2>/dev/null || rm -f bootstrap.env; } && rm -f docker-compose.override.yml && docker compose up -d --force-recreate"
+RC_FILE="${REPO_DIR}/data/admin-recovery-code.txt"
+
 info "Waiting for PPVDA to start..."
-for i in $(seq 1 60); do
-  if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
-    break
-  fi
-  sleep 2
-done
+HEALTHY="n"
+wait_healthy 60 && HEALTHY="y"
 
-if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
-  # Bootstrap succeeded — delete the one-time bootstrap file and override
-  if [ -f "$BOOTSTRAP_FILE" ]; then
-    shred -u "$BOOTSTRAP_FILE" 2>/dev/null || rm -f "$BOOTSTRAP_FILE"
-    rm -f docker-compose.override.yml
-    info "Bootstrap credentials removed (password stored as hash in DB)"
+if [ -f "$BOOTSTRAP_FILE" ]; then
+  # The recovery-code file is written right after the admin account is
+  # created — before the VPN comes up — so it also tells us bootstrap is
+  # done when a later step (e.g. Mullvad) keeps the app from going healthy.
+  if [ "$HEALTHY" = "y" ] || [ -f "$RC_FILE" ]; then
+    info "Removing bootstrap credentials and recreating the container without them..."
+    if bash -c "$BOOTSTRAP_CLEANUP" >/dev/null 2>&1; then
+      info "Bootstrap credentials removed (password stored as hash in DB, gone from the container config)"
+    else
+      warn "Could not recreate the container. The admin password is still in its config until you run:"
+      warn "  $BOOTSTRAP_CLEANUP"
+    fi
+    if [ "$HEALTHY" = "y" ]; then
+      wait_healthy 60 || HEALTHY="n"
+    fi
+  else
+    # Not bootstrapped yet. Finish the cleanup in the background as soon as
+    # it is (checked every 30 s for 24 h) rather than leaving the password
+    # in bootstrap.env and the container config indefinitely.
+    nohup setsid bash -c "for i in \$(seq 1 2880); do if [ -f $(printf '%q' "$RC_FILE") ] || curl -sf http://localhost:3000/health >/dev/null 2>&1; then $BOOTSTRAP_CLEANUP; exit; fi; sleep 30; done" \
+      >/var/log/ppvda-bootstrap-cleanup.log 2>&1 < /dev/null &
+    echo ""
+    warn "${BOLD}PPVDA has not created the admin account yet — the admin password is still in${NC}"
+    warn "${BOLD}${BOOTSTRAP_FILE} and in the container's configuration (docker inspect).${NC}"
+    warn "A background job removes it once the account exists (log: /var/log/ppvda-bootstrap-cleanup.log)."
+    warn "If you fix the problem later, or stop the job, remove it yourself:"
+    warn "  $BOOTSTRAP_CLEANUP"
   fi
+fi
 
+if [ "$HEALTHY" = "y" ]; then
   echo ""
   echo -e "${GREEN}${BOLD}PPVDA is running!${NC}"
   echo ""
@@ -549,7 +690,6 @@ if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
   echo ""
 
   # Read recovery code from the data directory
-  RC_FILE="${REPO_DIR}/data/admin-recovery-code.txt"
   if [ -f "$RC_FILE" ]; then
     RC=$(cat "$RC_FILE")
     echo -e "  ${YELLOW}${BOLD}RECOVERY CODE:${NC}"
@@ -585,7 +725,7 @@ if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
   [ -n "$MULLVAD_ACCOUNT" ] && echo "    - Mullvad VPN (${MULLVAD_LOCATION})"
   [ -n "$SSH_USER" ] && echo "    - SSH user '$SSH_USER' with sudo access"
   [ -n "$SSH_USER" ] && echo "    - Root SSH login disabled"
-  [ "$AUTO_UPDATE" = "y" ] || [ "$AUTO_UPDATE" = "Y" ] && echo "    - Auto-updates from main branch (daily at 4 AM)"
+  [ "$AUTO_UPDATE" = "y" ] || [ "$AUTO_UPDATE" = "Y" ] && echo "    - Auto-updates to new signed release tags (daily at 4 AM)"
   echo ""
   echo "  Useful commands:"
   echo "    docker compose logs -f        # follow logs"
@@ -598,6 +738,9 @@ if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
   warn "Back up this key separately — encrypted backups cannot be restored without it."
   echo ""
 else
-  warn "PPVDA may still be starting (Chromium install takes time)."
+  warn "PPVDA did not become healthy within 2 minutes."
   echo "  Check status: docker compose logs -f"
+  if [ -f "$RC_FILE" ]; then
+    echo "  Your admin recovery code is in ${RC_FILE} — read it, save it elsewhere, then delete the file."
+  fi
 fi

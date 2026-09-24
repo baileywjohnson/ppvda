@@ -54,6 +54,7 @@ export interface AppConfig {
   networkIdleMs: number;
   downloadTimeoutMs: number;
   maxDownloadBytes: number;
+  maxDownloadDurationSec: number;
   ffmpegPath: string;
   maxConcurrentDownloads: number;
   logLevel: string;
@@ -95,6 +96,9 @@ export function loadConfig(): AppConfig {
     // 10 GB default — high enough for long-form video, low enough to prevent
     // disk exhaustion from an infinite/misconfigured upstream response.
     maxDownloadBytes: parseInt(process.env.MAX_DOWNLOAD_BYTES ?? String(10 * 1024 * 1024 * 1024), 10),
+    // Cap on HLS/DASH/stream output duration (6 h default). Live streams
+    // have no end and are refused regardless.
+    maxDownloadDurationSec: parseInt(process.env.MAX_DOWNLOAD_DURATION_SEC ?? String(6 * 60 * 60), 10),
     ffmpegPath: process.env.FFMPEG_PATH ?? 'ffmpeg',
     maxConcurrentDownloads: parseInt(process.env.MAX_CONCURRENT_DOWNLOADS ?? '3', 10),
     logLevel: process.env.LOG_LEVEL ?? 'info',

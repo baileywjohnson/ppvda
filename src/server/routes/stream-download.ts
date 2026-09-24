@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { stat, writeFile } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
@@ -14,7 +14,8 @@ import { isVpnSwitching } from '../../mullvad/index.js';
 import { isDirectMediaUrl } from '../../extractor/patterns.js';
 import { resolveProxy, type VpnPermissionStore } from '../vpn-permissions.js';
 import { getHttpAgent } from '../../proxy/index.js';
-import { ffmpegRouteSem } from './ffmpeg-concurrency.js';
+import { clientGoneSignal, ffmpegRouteSem, streamDownloadUserLimit } from './ffmpeg-concurrency.js';
+import { AbortedError, QueueFullError } from '../../utils/semaphore.js';
 
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif', '.bmp', '.tiff']);
 
@@ -47,6 +48,8 @@ export async function streamDownloadRoutes(
     ffmpegPath: string;
     downloadDir: string;
     downloadTimeoutMs: number;
+    maxDownloadBytes: number;
+    maxDownloadDurationSec: number;
     preHandler?: preHandlerHookHandler;
   },
 ) {
@@ -62,6 +65,8 @@ export async function streamDownloadRoutes(
     async (request, reply) => {
       const { videoUrl, filename, useVpn } = request.body;
       const user = (request as any).user;
+      // Created before any await so a hang-up at any point is seen.
+      const signal = clientGoneSignal(reply);
       const proxy = resolveProxy(useVpn, user.sub, user.isAdmin, opts.vpnPermissions, opts.proxyConfig);
 
       if (proxy && isVpnSwitching()) {
@@ -86,17 +91,37 @@ export async function streamDownloadRoutes(
         return;
       }
 
-      const ext = getExtFromUrl(videoUrl);
-      const isImage = IMAGE_EXTENSIONS.has(ext);
+      // Per-user cap on running + queued downloads, so one account can't
+      // fill the shared ffmpeg queue.
+      const releaseUser = streamDownloadUserLimit.tryAcquire(user.sub);
+      if (!releaseUser) {
+        reply.status(429).send({ success: false, error: 'Too many downloads in progress — wait for one to finish' });
+        return;
+      }
+      try {
+        const ext = getExtFromUrl(videoUrl);
+        const isImage = IMAGE_EXTENSIONS.has(ext);
 
-      if (isImage) {
-        await handleImageDownload(videoUrl, ext, filename, proxy, request, reply, opts.downloadTimeoutMs);
-      } else {
-        await handleVideoDownload(videoUrl, filename, proxy, request, reply, opts);
+        if (isImage) {
+          await handleImageDownload(videoUrl, ext, filename, proxy, reply, opts.downloadTimeoutMs, opts.maxDownloadBytes, signal);
+        } else {
+          await handleVideoDownload(videoUrl, filename, proxy, reply, opts, signal);
+        }
+      } finally {
+        releaseUser();
       }
     },
   );
 }
+
+// Headers for every hijacked response. hijack() bypasses the global onSend
+// hook, so its nosniff/CSP never reach these; the body is attacker bytes
+// served from the PPVDA origin and must never be interpreted as a document.
+const DOWNLOAD_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Content-Security-Policy': "default-src 'none'; sandbox",
+  'Cache-Control': 'no-store',
+} as const;
 
 /**
  * Image download: direct HTTP fetch, no ffmpeg. Preserves original format.
@@ -112,9 +137,10 @@ async function handleImageDownload(
   ext: string,
   filename: string | undefined,
   proxy: ProxyConfig | undefined,
-  request: any,
   reply: any,
   timeoutMs: number,
+  maxBytes: number,
+  signal: AbortSignal,
 ) {
   const safeName = sanitizeFilename(filename ?? 'image') + ext;
   const contentType = MIME_MAP[ext] ?? 'application/octet-stream';
@@ -141,6 +167,20 @@ async function handleImageDownload(
   const mod = parsed.protocol === 'https:' ? https : http;
 
   await new Promise<void>((resolve) => {
+    // One exit path: an error before the headers went out is a JSON error;
+    // after the hijack the only honest signal is dropping the connection.
+    let done = false;
+    const finish = (status?: number, error?: string) => {
+      if (done) return;
+      done = true;
+      if (status && !reply.raw.headersSent && !signal.aborted) {
+        reply.status(status).send({ success: false, error });
+      } else if (status) {
+        reply.raw.destroy();
+      }
+      resolve();
+    };
+
     const req = mod.request(
       url,
       {
@@ -148,6 +188,7 @@ async function handleImageDownload(
         agent,
         lookup,
         timeout: timeoutMs,
+        signal,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         },
@@ -157,41 +198,52 @@ async function handleImageDownload(
         // re-validate per hop.
         if (!res.statusCode || res.statusCode >= 400 || (res.statusCode >= 300 && res.statusCode < 400)) {
           res.resume();
-          reply.status(502).send({ success: false, error: 'Failed to download image' });
-          resolve();
+          finish(502, 'Failed to download image');
           return;
         }
 
-        const len = res.headers['content-length'];
+        const len = parseInt(String(res.headers['content-length'] ?? ''), 10);
+        if (Number.isFinite(len) && len > maxBytes) {
+          res.destroy();
+          finish(413, 'Image too large');
+          return;
+        }
         reply.hijack();
         reply.raw.writeHead(200, {
+          ...DOWNLOAD_HEADERS,
           'Content-Type': contentType,
           'Content-Disposition': `attachment; filename="${safeName}"`,
-          ...(len ? { 'Content-Length': String(len) } : {}),
-          'Cache-Control': 'no-store',
+          ...(Number.isFinite(len) && len >= 0 ? { 'Content-Length': String(len) } : {}),
         });
 
+        // Byte cap for bodies without (or lying about) Content-Length.
+        let received = 0;
         res.on('data', (chunk: Buffer) => {
-          reply.raw.write(chunk);
+          received += chunk.length;
+          if (received > maxBytes) {
+            res.destroy();
+            finish(413, 'Image too large');
+            return;
+          }
+          // Honour backpressure from a slow client.
+          if (!reply.raw.write(chunk)) {
+            res.pause();
+            reply.raw.once('drain', () => res.resume());
+          }
         });
         res.on('end', () => {
           reply.raw.end();
-          resolve();
+          finish();
         });
-        res.on('error', () => {
-          reply.raw.end();
-          resolve();
+        res.on('close', () => {
+          if (!res.complete) finish(502, 'Failed to download image');
         });
       },
     );
-    req.on('error', () => {
-      reply.status(502).send({ success: false, error: 'Failed to download image' });
-      resolve();
-    });
+    req.on('error', () => finish(502, 'Failed to download image'));
     req.on('timeout', () => {
       req.destroy();
-      reply.status(504).send({ success: false, error: 'Image download timed out' });
-      resolve();
+      finish(504, 'Image download timed out');
     });
     req.end();
   });
@@ -204,13 +256,24 @@ async function handleVideoDownload(
   videoUrl: string,
   filename: string | undefined,
   proxy: ProxyConfig | undefined,
-  request: any,
   reply: any,
-  opts: { ffmpegPath: string; downloadDir: string; downloadTimeoutMs: number },
+  opts: { ffmpegPath: string; downloadDir: string; downloadTimeoutMs: number; maxDownloadBytes: number; maxDownloadDurationSec: number },
+  signal: AbortSignal,
 ) {
   const safeName = sanitizeFilename(filename ?? 'video') + '.mp4';
 
-  await ffmpegRouteSem.acquire();
+  // Wait for an ffmpeg slot. A full queue is a 503; a client that hangs up
+  // while queued is dropped from the queue rather than served later.
+  try {
+    await ffmpegRouteSem.acquire(signal);
+  } catch (err) {
+    if (err instanceof QueueFullError) {
+      reply.status(503).send({ success: false, error: err.message });
+    } else if (!(err instanceof AbortedError)) {
+      throw err;
+    }
+    return;
+  }
   // Stage inside DOWNLOAD_DIR (the tmpfs-backed location SECURITY.md
   // recommends), in a private per-request directory. This used to be
   // DOWNLOAD_DIR/../tmp, which sits outside that tmpfs.
@@ -218,22 +281,26 @@ async function handleVideoDownload(
   try {
     workDir = await makeJobDir(opts.downloadDir);
     const tempPath = join(workDir, 'stream.mp4');
+    // The signal kills ffmpeg if the client disconnects mid-download.
     await runFfmpeg({
       inputUrl: videoUrl,
       outputPath: tempPath,
       ffmpegPath: opts.ffmpegPath,
       proxyConfig: proxy,
       timeoutMs: opts.downloadTimeoutMs,
+      maxBytes: opts.maxDownloadBytes,
+      maxDurationSec: opts.maxDownloadDurationSec,
+      signal,
     });
 
     const fileStat = await stat(tempPath);
 
     reply.hijack();
     reply.raw.writeHead(200, {
+      ...DOWNLOAD_HEADERS,
       'Content-Type': 'video/mp4',
       'Content-Disposition': `attachment; filename="${safeName}"`,
       'Content-Length': String(fileStat.size),
-      'Cache-Control': 'no-store',
     });
 
     try {
@@ -246,7 +313,9 @@ async function handleVideoDownload(
   } catch {
     // After hijack() Fastify no longer owns the response; only send an
     // error if headers haven't gone out yet.
-    if (!reply.raw.headersSent) {
+    if (signal.aborted) {
+      reply.raw.destroy();
+    } else if (!reply.raw.headersSent) {
       reply.status(502).send({ success: false, error: 'Failed to download video' });
     } else {
       reply.raw.destroy();

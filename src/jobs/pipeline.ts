@@ -11,6 +11,7 @@ import { isVpnSwitching } from '../mullvad/index.js';
 import { isVpnHealthy, isVpnKillSwitchEnabled } from '../mullvad/health.js';
 import { isPrivateUrl } from '../utils/url.js';
 import { secureRemoveDir, purgeStaleJobDirs } from '../utils/fs.js';
+import { AppError } from '../utils/errors.js';
 import { resolveProxy, type VpnPermissionStore } from '../server/vpn-permissions.js';
 import { getUserDarkreelDelegation } from '../server/routes/settings.js';
 import type { VideoType, MediaType } from '../extractor/types.js';
@@ -23,6 +24,7 @@ export interface PipelineOpts {
   defaultNetworkIdleMs: number;
   downloadTimeoutMs: number;
   maxDownloadBytes: number;
+  maxDownloadDurationSec: number;
   preferredHosts: string[];
   blockedHosts: string[];
   allowedHosts: string[];
@@ -99,7 +101,9 @@ export function createPipeline(
         try {
           await processJob(job.id, userId, input, store, opts, db, sessions, logger);
         } catch (err) {
+          // err.message is shown to the job's owner only; log nothing from it.
           store.update(job.id, { status: 'failed', error: err instanceof Error ? err.message : 'Unknown error' });
+          logger.error({ jobId: job.id, code: errorCode(err) }, 'Job failed');
         } finally {
           sem.release();
         }
@@ -228,14 +232,15 @@ async function processJob(
       filename: input.filename,
       timeoutMs: opts.downloadTimeoutMs,
       maxBytes: opts.maxDownloadBytes,
+      maxDurationSec: opts.maxDownloadDurationSec,
       proxy,
       ffmpegPath: opts.ffmpegPath,
     });
 
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    logger.error({ jobId, err: errMsg }, 'Download failed');
-    store.update(jobId, { status: 'failed', error: 'Download failed' });
+    // Log the error code only: download error messages embed hostnames.
+    logger.error({ jobId, code: errorCode(err) }, 'Download failed');
+    store.update(jobId, { status: 'failed', error: downloadErrorMessage(err) });
     return;
   }
 
@@ -252,7 +257,7 @@ async function processJob(
     logger.info({ jobId }, 'Download complete');
 
     if (!store.isActive(jobId)) return;
-    await uploadStep(jobId, userId, download.filePath, store, opts, db, sessions, logger);
+    await uploadStep(jobId, userId, isAdmin, download.filePath, store, opts, db, sessions, logger);
   } finally {
     await secureRemoveDir(download.workDir);
   }
@@ -261,6 +266,7 @@ async function processJob(
 async function uploadStep(
   jobId: string,
   userId: string,
+  isAdmin: boolean,
   filePath: string,
   store: JobStore,
   opts: PipelineOpts,
@@ -303,6 +309,7 @@ async function uploadStep(
         publicKey: delegation.publicKey,
         refreshToken: delegation.refreshToken,
       },
+      admin: isAdmin,
       filePath,
       ffmpegPath: opts.ffmpegPath,
       timeoutMs: opts.drkUploadTimeoutMs,
@@ -313,11 +320,25 @@ async function uploadStep(
       logger.info({ jobId }, 'Uploaded to Darkreel');
     } else {
       store.update(jobId, { status: 'failed', error: result.error ?? 'Darkreel upload failed' });
-      logger.error({ jobId, err: result.error, detail: result.detail }, 'Darkreel upload failed');
+      logger.error({ jobId, code: result.code }, 'Darkreel upload failed');
     }
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
     store.update(jobId, { status: 'failed', error: 'Darkreel upload failed' });
-    logger.error({ jobId, err: errMsg }, 'Darkreel upload error');
+    logger.error({ jobId, code: errorCode(err) }, 'Darkreel upload error');
   }
+}
+
+/** Log-safe identifier for an error: its code, never its message. */
+function errorCode(err: unknown): string {
+  if (err instanceof AppError) return err.code;
+  return err instanceof Error ? err.name : 'UnknownError';
+}
+
+// User-facing text for the download failures worth distinguishing.
+function downloadErrorMessage(err: unknown): string {
+  const code = err instanceof AppError ? err.code : undefined;
+  if (code === 'LIVE_STREAM') return 'Download failed — live streams are not supported';
+  if (code === 'SIZE_EXCEEDED') return 'Download failed — file exceeds the maximum download size';
+  if (code === 'DURATION_EXCEEDED') return 'Download failed — stream exceeds the maximum duration';
+  return 'Download failed';
 }

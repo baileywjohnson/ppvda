@@ -22,13 +22,25 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
 
+# --- Native build toolchain (deps + build stages only) ---
+# better-sqlite3 ships prebuilt binaries for linux/amd64 but not for every
+# platform (linux/arm64 in particular), where `npm ci` falls back to
+# node-gyp and needs python3, make and a C++ compiler. They stay out of the
+# runtime image: it only receives the compiled node_modules.
+FROM base AS toolchain
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
 # --- Dependencies stage ---
-FROM base AS deps
+FROM toolchain AS deps
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # --- Build stage ---
-FROM base AS build
+FROM toolchain AS build
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./

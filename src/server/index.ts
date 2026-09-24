@@ -61,7 +61,11 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('X-Frame-Options', 'DENY');
     reply.header('Referrer-Policy', 'no-referrer');
-    reply.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'");
+    // Routes that serve upstream bytes (/thumbnail) set a stricter
+    // sandboxing policy of their own; don't loosen it back to the app's.
+    if (!reply.hasHeader('Content-Security-Policy')) {
+      reply.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'");
+    }
     reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     reply.header('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
   });
@@ -117,6 +121,7 @@ export async function buildApp(config: AppConfig, db: DB, sessions: SessionStore
     defaultNetworkIdleMs: config.networkIdleMs,
     downloadTimeoutMs: config.downloadTimeoutMs,
     maxDownloadBytes: config.maxDownloadBytes,
+    maxDownloadDurationSec: config.maxDownloadDurationSec,
     preferredHosts: config.preferredHosts,
     blockedHosts: config.blockedHosts,
     allowedHosts: config.allowedHosts,

@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { localInputArgs, minimalEnv } from '../downloader/ffmpeg.js';
+import { secureUnlink } from '../utils/fs.js';
 
 // Darkreel-compatible thumbnail generator. Produces a JPEG between ~10 KB and
 // ~250 KB. For videos we grab a frame at t=1s; for images we scale to 320px.
@@ -46,19 +48,22 @@ export async function generateThumbnail(
 ): Promise<Buffer> {
   if (mediaType === 'file') return PLACEHOLDER_JPEG;
 
-  let workDir: string | null = null;
+  // The thumbnail is derived plaintext, so it is written next to the source
+  // inside the job's private directory (tmpfs in the documented deployment)
+  // and securely unlinked, not left in the OS temp dir.
+  const out = join(dirname(filePath), `.thumb-${randomUUID()}.jpg`);
   try {
-    workDir = await mkdtemp(join(tmpdir(), 'ppvda-thumb-'));
-    const out = join(workDir, 'thumb.jpg');
+    const input = await localInputArgs(filePath);
+    if (!input) return PLACEHOLDER_JPEG;
 
     const args = mediaType === 'video'
-      ? ['-nostdin', '-y', '-v', 'error', '-ss', '1', '-i', filePath, '-vframes', '1',
+      ? ['-nostdin', '-y', '-v', 'error', '-ss', '1', ...input, '-vframes', '1',
          '-vf', 'scale=320:-1', '-q:v', '5', out]
-      : ['-nostdin', '-y', '-v', 'error', '-i', filePath,
+      : ['-nostdin', '-y', '-v', 'error', ...input, '-vframes', '1',
          '-vf', 'scale=320:-1', '-q:v', '5', out];
 
     await new Promise<void>((resolve, reject) => {
-      const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      const proc = spawn(ffmpegPath, args, { env: minimalEnv(), stdio: ['ignore', 'ignore', 'ignore'] });
       const timer = setTimeout(() => { proc.kill('SIGKILL'); reject(new Error('ffmpeg timeout')); }, 15000);
       proc.on('exit', (code) => {
         clearTimeout(timer);
@@ -74,8 +79,6 @@ export async function generateThumbnail(
   } catch {
     return PLACEHOLDER_JPEG;
   } finally {
-    if (workDir) {
-      await rm(workDir, { recursive: true, force: true }).catch(() => {});
-    }
+    await secureUnlink(out);
   }
 }

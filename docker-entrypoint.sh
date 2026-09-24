@@ -15,8 +15,8 @@ fi
 #      length-prefixed JSON protocol over a Unix socket.
 #
 #   2. The Node app runs as the `ppvda` user. When it needs to bring up
-#      the tunnel, switch countries, or add a bypass route it sends an
-#      RPC to the supervisor. SO_PEERCRED on the supervisor side rejects
+#      the tunnel, switch countries, or route one of the pinned bypass
+#      hosts (below) it sends an RPC to the supervisor. SO_PEERCRED on the supervisor side rejects
 #      any connection that isn't from the ppvda uid.
 #
 # This recovers Chromium's user-namespace sandbox: when Playwright spawns
@@ -30,11 +30,21 @@ fi
 
 PPVDA_UID="$(id -u ppvda)"
 
+# The hosts that may be routed around the tunnel are fixed here, from the
+# container's environment, before anything unprivileged runs. The Node app
+# can only ask the supervisor to route names from this list and never
+# supplies addresses: SO_PEERCRED can't tell Node apart from Chromium or
+# ffmpeg (same uid), so a caller-chosen IP would let any of them punch a hole
+# in the kill switch and learn the server's real IP. api.mullvad.net is
+# always included (device registration/removal, relay list).
+BYPASS_HOSTS="api.mullvad.net,${VPN_BYPASS_HOSTS:-}"
+
 # Start the supervisor in the background with its pid captured. The
 # supervisor MkdirAlls /run/ppvda itself if needed, but the Dockerfile
 # also creates it at build time so the socket's parent exists from the
 # first boot.
-/usr/local/bin/wg-supervisor -socket /run/ppvda/wg.sock -uid "$PPVDA_UID" &
+/usr/local/bin/wg-supervisor -socket /run/ppvda/wg.sock -uid "$PPVDA_UID" \
+  -bypass-hosts "$BYPASS_HOSTS" &
 SUPERVISOR_PID=$!
 
 # Propagate termination signals so `docker stop` tears the supervisor

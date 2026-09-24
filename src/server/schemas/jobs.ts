@@ -4,7 +4,9 @@ export const createJobRequestSchema = {
     url: { type: 'string' },
     videoUrl: { type: 'string' },
     filename: { type: 'string', maxLength: 200 },
-    timeout: { type: 'number' },
+    // Same bounds as /extract: each second of timeout pins a Chromium
+    // context and a download slot.
+    timeout: { type: 'number', minimum: 1000, maximum: 120000 },
     useVpn: { type: 'boolean' },
     autoPlay: { type: 'boolean' },
   },

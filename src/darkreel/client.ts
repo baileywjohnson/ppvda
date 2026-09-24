@@ -7,80 +7,84 @@ import { detectMediaType, generateThumbnail, type MediaType } from './thumbnail.
 import { probeLocalFile, padToBucket } from './probe.js';
 import { extractCodecsFromMP4 } from './mp4-codecs.js';
 import { remuxToFragmentedMP4 } from '../downloader/ffmpeg.js';
+import {
+  DarkreelError,
+  darkreelPost,
+  darkreelPostJson,
+  resolveDarkreelTarget,
+} from './http.js';
 
 // Native Darkreel client. Replaces the spawn(darkreel-cli) hook with pure
 // Node code that speaks the Phase 2 sealed-box upload protocol directly.
 // The stored credential is a per-user refresh token + the user's X25519
 // public key, not a password. PPVDA cannot decrypt what it uploads, by
 // construction: it only holds the public key.
+//
+// All network I/O goes through ./http.ts, which re-validates the stored
+// server URL, pins DNS, and caps response sizes on every call. `admin`
+// (read from the DB by the caller) selects the private-host/http policy.
 
-const CHUNK_SIZE = 1 << 20; // 1 MB, matches Darkreel server
 const AES_ALGO = 'aes-256-gcm';
 const NONCE_LEN = 12;
+const EXCHANGE_TIMEOUT_MS = 15000;
+
+// The only delegation scope PPVDA accepts. A server that hands back a
+// broader scope is not the upload-only delegation the user agreed to.
+const UPLOAD_SCOPE = 'upload';
 
 export interface DarkreelConnection {
-  serverUrl: string;
+  serverUrl: string; // origin only (scheme://host[:port])
   userId: string; // the Darkreel-side user ID
   delegationId: string;
   publicKey: Buffer;  // 32-byte raw X25519 pubkey
   refreshToken: string;
 }
 
-interface ExchangeResponse {
-  user_id: string;
-  public_key: string;
-  refresh_token: string;
-  delegation_id: string;
-  scope: string;
-}
+// Shape checks for fields read from the Darkreel server. The server is
+// user-chosen, so its replies are validated like any other untrusted input:
+// string types, bounded lengths, and charsets that can't smuggle anything
+// into a header or log line.
+const ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+const REFRESH_TOKEN_RE = /^[A-Za-z0-9_-]{16,512}$/;
+const ACCESS_TOKEN_RE = /^[A-Za-z0-9_.-]{16,8192}$/;
+const PUBLIC_KEY_B64_RE = /^[A-Za-z0-9+/]{43}=$/; // exactly 32 bytes
 
-interface RefreshResponse {
-  access_token: string;
-  expires_in: number;
-  token_type: string;
-  scope: string;
+function field(data: Record<string, unknown>, name: string, re: RegExp): string {
+  const v = data[name];
+  if (typeof v !== 'string' || !re.test(v)) throw new DarkreelError('BAD_RESPONSE');
+  return v;
 }
 
 /**
  * Exchange a one-shot authorization code for a durable refresh token.
  * The Darkreel SPA produced the code in its "Authorize an App" flow; the
- * user pasted it into PPVDA. Both code and server URL come from the user,
- * so validate minimally and let the server's own rate limiter handle the
- * rest.
+ * user pasted it into PPVDA. The returned connection's serverUrl is the
+ * normalised origin — store that, not the raw input.
  */
 export async function exchangeCode(
   serverUrl: string,
   code: string,
-  abortSignal?: AbortSignal,
+  opts: { admin: boolean; signal?: AbortSignal },
 ): Promise<DarkreelConnection> {
-  const url = serverUrl.replace(/\/+$/, '') + '/api/delegation/exchange';
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ authorization_code: code }),
-    signal: abortSignal ?? AbortSignal.timeout(15000),
-    redirect: 'error', // refuse redirects — the server shouldn't send any
-  });
-  if (!res.ok) {
-    // Drain and discard the body. Reflecting the upstream response text
-    // into a thrown Error (and thus into the HTTP response surfaced to the
-    // admin who is allowed to target private URLs) would turn this into an
-    // SSRF primitive with body-leak — e.g. IMDS `/latest/meta-data/…` text.
-    // We only keep the status code.
-    await res.text().catch(() => '');
-    throw new Error(`Authorization code exchange failed (HTTP ${res.status})`);
-  }
-  const data = (await res.json()) as ExchangeResponse;
-  const publicKey = Buffer.from(data.public_key, 'base64');
-  if (publicKey.length !== 32) {
-    throw new Error('Darkreel returned an unexpected public key length');
-  }
+  const target = await resolveDarkreelTarget(serverUrl, opts.admin);
+  // Only the status survives a failure. Reflecting the upstream body into
+  // the error (and thus into the HTTP response surfaced to an admin who is
+  // allowed to target private URLs) would turn this into an SSRF primitive
+  // with body-leak — e.g. IMDS `/latest/meta-data/…` text.
+  const { status, data } = await darkreelPostJson(
+    target, '/api/delegation/exchange', { authorization_code: code }, EXCHANGE_TIMEOUT_MS, opts.signal,
+  );
+  if (!data) throw new DarkreelError('HTTP_STATUS', status);
+
+  if (data.scope !== UPLOAD_SCOPE) throw new DarkreelError('SCOPE_MISMATCH');
+  const publicKey = Buffer.from(field(data, 'public_key', PUBLIC_KEY_B64_RE), 'base64');
+  if (publicKey.length !== 32) throw new DarkreelError('BAD_RESPONSE');
   return {
-    serverUrl,
-    userId: data.user_id,
-    delegationId: data.delegation_id,
+    serverUrl: target.origin.origin,
+    userId: field(data, 'user_id', ID_RE),
+    delegationId: field(data, 'delegation_id', ID_RE),
     publicKey,
-    refreshToken: data.refresh_token,
+    refreshToken: field(data, 'refresh_token', REFRESH_TOKEN_RE),
   };
 }
 
@@ -93,25 +97,23 @@ export async function exchangeCode(
 export async function refreshAccessToken(
   serverUrl: string,
   refreshToken: string,
-  abortSignal?: AbortSignal,
+  opts: { admin: boolean; signal?: AbortSignal },
 ): Promise<string> {
-  const url = serverUrl.replace(/\/+$/, '') + '/api/delegation/refresh';
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refresh_token: refreshToken }),
-    signal: abortSignal ?? AbortSignal.timeout(15000),
-    redirect: 'error',
-  });
-  if (!res.ok) {
-    throw new Error('Refresh token rejected by Darkreel — the delegation may have been revoked');
+  const target = await resolveDarkreelTarget(serverUrl, opts.admin);
+  const { status, data } = await darkreelPostJson(
+    target, '/api/delegation/refresh', { refresh_token: refreshToken }, EXCHANGE_TIMEOUT_MS, opts.signal,
+  );
+  if (!data) {
+    throw new DarkreelError(status === 401 || status === 403 ? 'REVOKED' : 'HTTP_STATUS', status);
   }
-  const data = (await res.json()) as RefreshResponse;
-  return data.access_token;
+  if (data.scope !== UPLOAD_SCOPE) throw new DarkreelError('SCOPE_MISMATCH');
+  return field(data, 'access_token', ACCESS_TOKEN_RE);
 }
 
 export interface UploadFileOptions {
   conn: DarkreelConnection;
+  /** From the DB at call time: admin-connected URLs may be http / private. */
+  admin: boolean;
   accessToken: string;
   filePath: string;
   ffmpegPath: string;
@@ -132,7 +134,7 @@ export interface UploadFileOptions {
  * caught by the AEAD.
  */
 export async function uploadFile(opts: UploadFileOptions): Promise<void> {
-  const { conn, accessToken, filePath, ffmpegPath, timeoutMs } = opts;
+  const { conn, admin, accessToken, filePath, ffmpegPath, timeoutMs } = opts;
 
   const mediaID = randomUUID();
   const mediaIDBytes = Buffer.from(mediaID, 'utf-8');
@@ -188,7 +190,7 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
   const fileSize = statRes.size;
 
   const segments = fragmented
-    ? await scanFMP4Segments(uploadPath, fileSize)
+    ? mergeSegments(await scanFMP4Segments(uploadPath, fileSize), CHUNK_DATA_SIZE)
     : makeFixedSegments(fileSize);
   const chunkCount = segments.length;
   if (chunkCount > 50000) throw new Error(`file too large: ${chunkCount} chunks exceeds server limit`);
@@ -202,7 +204,7 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
   try {
     // Thumbnail. Generate off-disk (ffmpeg for media, placeholder for file).
     const thumbPlain = await generateThumbnail(uploadPath, mediaType, ffmpegPath);
-    const thumbEnc = encryptChunk(thumbPlain, thumbKey, 0, mediaIDBytes);
+    const thumbEnc = encryptChunk(frame(thumbPlain, true, THUMB_CIPHERTEXT_SIZE), thumbKey, 0, mediaIDBytes);
 
     // Metadata blob, encrypted under its own key (not the master key) so a
     // delegated client can write metadata without ever holding the master.
@@ -217,6 +219,7 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
       mime_type: mimeFromExt(fileName) ?? 'application/octet-stream',
       size: fileSize,
       chunk_count: chunkCount,
+      chunk_format: CHUNK_FORMAT,
     };
     if (mediaType === 'video' || mediaType === 'image') {
       const info = await probeLocalFile(uploadPath, ffmpegPath);
@@ -259,10 +262,7 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
     const thumbKeySealed = seal(thumbKey, conn.publicKey);
     const metadataKeySealed = seal(metadataKey, conn.publicKey);
 
-    // Streaming multipart assembly. Encrypt each chunk as we read it so only
-    // one chunk of plaintext is in memory at a time for large files.
-    const form = new FormData();
-    form.set('metadata', JSON.stringify({
+    const metadataJson = JSON.stringify({
       media_id: mediaID,
       chunk_count: chunkCount,
       file_key_sealed: fileKeySealed.toString('base64'),
@@ -270,34 +270,81 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
       metadata_key_sealed: metadataKeySealed.toString('base64'),
       metadata_enc: metadataCiphertext.toString('base64'),
       metadata_nonce: metadataNonce.toString('base64'),
-    }));
-    form.set('thumbnail', new Blob([bufferToU8(thumbEnc)], { type: 'application/octet-stream' }), 'thumb.enc');
+    });
 
-    const fd = await open(uploadPath, 'r');
-    try {
-      for (let i = 0; i < chunkCount; i++) {
-        const seg = segments[i];
-        const buf = Buffer.alloc(seg.size);
-        const { bytesRead } = await fd.read(buf, 0, buf.length, seg.offset);
-        if (bytesRead !== buf.length) throw new Error(`short read at chunk ${i}`);
-        const enc = encryptChunk(buf, fileKey, i, mediaIDBytes);
-        form.set(`chunk${i}`, new Blob([bufferToU8(enc)], { type: 'application/octet-stream' }), `${i}.enc`);
-        buf.fill(0);
+    // Streamed multipart body: parts are produced as the request pulls them,
+    // so at most one chunk of plaintext and one of ciphertext are in memory
+    // at a time — not the whole encrypted file. Part order is what Darkreel's
+    // handler requires: metadata, thumbnail, then chunk0..chunkN-1.
+    const boundary = `----ppvda${randomBytes(16).toString('hex')}`;
+    const partHeader = (name: string, filename?: string) => Buffer.from(
+      `--${boundary}\r\n` +
+      (filename
+        ? `Content-Disposition: form-data; name="${name}"; filename="${filename}"\r\n` +
+          'Content-Type: application/octet-stream\r\n'
+        : `Content-Disposition: form-data; name="${name}"\r\n`) +
+      '\r\n',
+      'utf-8',
+    );
+    const CRLF = Buffer.from('\r\n');
+
+    // A local failure inside the body (e.g. a short read) surfaces through
+    // the request as a transport error; remember it to report the real cause.
+    let bodyError: Error | undefined;
+    async function* multipartBody(): AsyncGenerator<Buffer> {
+      try {
+        yield partHeader('metadata');
+        yield Buffer.from(metadataJson, 'utf-8');
+        yield CRLF;
+
+        yield partHeader('thumbnail', 'thumb.enc');
+        yield thumbEnc;
+        yield CRLF;
+
+        const fd = await open(uploadPath, 'r');
+        try {
+          for (let i = 0; i < chunkCount; i++) {
+            const seg = segments[i];
+            const buf = Buffer.alloc(seg.size);
+            const { bytesRead } = await fd.read(buf, 0, buf.length, seg.offset);
+            if (bytesRead !== buf.length) throw new Error(`short read at chunk ${i}`);
+            // The one place a chunk's plaintext is encrypted — as a padded
+            // format-2 frame (see frameChunk).
+            const framed = frameChunk(buf, i === chunkCount - 1);
+            buf.fill(0);
+            const enc = encryptChunk(framed, fileKey, i, mediaIDBytes);
+            framed.fill(0);
+            yield partHeader(`chunk${i}`, `${i}.enc`);
+            yield enc;
+            yield CRLF;
+          }
+        } finally {
+          await fd.close();
+        }
+
+        yield Buffer.from(`--${boundary}--\r\n`, 'utf-8');
+      } catch (err) {
+        bodyError = err instanceof Error ? err : new Error(String(err));
+        throw err;
       }
-    } finally {
-      await fd.close();
     }
 
-    const res = await fetch(conn.serverUrl.replace(/\/+$/, '') + '/api/media/upload', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}` },
-      body: form as unknown as BodyInit,
-      signal: AbortSignal.timeout(timeoutMs),
-      redirect: 'error',
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Darkreel upload failed (${res.status}): ${text.slice(0, 200)}`);
+    const target = await resolveDarkreelTarget(conn.serverUrl, admin);
+    let res;
+    try {
+      res = await darkreelPost(target, '/api/media/upload', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        },
+        body: multipartBody(),
+        timeoutMs,
+      });
+    } catch (err) {
+      throw bodyError ?? err;
+    }
+    if (res.status < 200 || res.status >= 300) {
+      throw new DarkreelError('HTTP_STATUS', res.status);
     }
   } finally {
     fileKey.fill(0);
@@ -310,6 +357,64 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
 }
 
 // --- internal helpers ---
+
+// Darkreel chunk format 2 (mirrors web/js/crypto.js and darkreel-cli's
+// internal/crypto/frame.go). Each chunk's plaintext is a frame
+//   version(1)=2 | flags(1, bit0 = last chunk) | u32be data length | data | zero padding
+// padded so the ciphertext (nonce + frame + tag) is exactly 1/2/4/8/16 MiB,
+// then whole MiB; thumbnails are exactly 256 KiB. Darkreel's server and the
+// network then only ever see bucket sizes, never exact chunk lengths, and
+// the encrypted last-chunk flag lets readers detect a dropped tail.
+const CHUNK_FORMAT = 2;
+const FRAME_HEADER = 6;
+const GCM_OVERHEAD = 28; // 12-byte nonce + 16-byte tag
+const MIB = 1024 * 1024;
+// Largest payload that fits the smallest (1 MiB) bucket.
+const CHUNK_DATA_SIZE = MIB - GCM_OVERHEAD - FRAME_HEADER;
+const THUMB_CIPHERTEXT_SIZE = 256 * 1024;
+
+function chunkCiphertextSize(dataLen: number): number {
+  const need = dataLen + FRAME_HEADER + GCM_OVERHEAD;
+  for (const b of [1, 2, 4, 8, 16]) {
+    if (need <= b * MIB) return b * MIB;
+  }
+  return Math.ceil(need / MIB) * MIB;
+}
+
+function frame(data: Buffer, isLast: boolean, ciphertextSize: number): Buffer {
+  const frameLen = ciphertextSize - GCM_OVERHEAD;
+  if (data.length + FRAME_HEADER > frameLen) throw new Error('chunk too large for its frame');
+  const out = Buffer.alloc(frameLen);
+  out[0] = CHUNK_FORMAT;
+  out[1] = isLast ? 1 : 0;
+  out.writeUInt32BE(data.length, 2);
+  data.copy(out, FRAME_HEADER);
+  return out;
+}
+
+function frameChunk(data: Buffer, isLast: boolean): Buffer {
+  return frame(data, isLast, chunkCiphertextSize(data.length));
+}
+
+// Join consecutive fMP4 fragments into chunks of at most maxLen bytes so each
+// fills a bucket, instead of every small fragment being padded to 1 MiB on
+// its own. The init segment stays separate; an oversized fragment gets its
+// own chunk.
+function mergeSegments(segs: Segment[], maxLen: number): Segment[] {
+  if (segs.length <= 2) return segs;
+  const out: Segment[] = [segs[0]];
+  let cur = { ...segs[1] };
+  for (const s of segs.slice(2)) {
+    if (s.offset === cur.offset + cur.size && cur.size + s.size <= maxLen) {
+      cur.size += s.size;
+      continue;
+    }
+    out.push(cur);
+    cur = { ...s };
+  }
+  out.push(cur);
+  return out;
+}
 
 function encryptChunk(plaintext: Buffer, key: Buffer, chunkIndex: number, mediaIDBytes: Buffer): Buffer {
   // AAD = utf8(mediaID) || BigEndian(uint64(chunkIndex))
@@ -342,21 +447,12 @@ function mimeFromExt(filename: string): string | undefined {
 // pulling in ./thumbnail directly.
 export type { MediaType };
 
-// Node's Buffer is typed as Uint8Array<ArrayBufferLike> (buffer may be a
-// SharedArrayBuffer), but DOM BlobPart requires Uint8Array<ArrayBuffer>.
-// Hand Blob a freshly-allocated ArrayBuffer view to satisfy the stricter
-// type. One memcpy per chunk — throughput bottleneck is network + GCM.
-function bufferToU8(buf: Buffer): Uint8Array<ArrayBuffer> {
-  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
-  return new Uint8Array(ab);
-}
-
 interface Segment { offset: number; size: number; }
 
 function makeFixedSegments(fileSize: number): Segment[] {
   const out: Segment[] = [];
-  for (let off = 0; off < fileSize; off += CHUNK_SIZE) {
-    out.push({ offset: off, size: Math.min(CHUNK_SIZE, fileSize - off) });
+  for (let off = 0; off < fileSize; off += CHUNK_DATA_SIZE) {
+    out.push({ offset: off, size: Math.min(CHUNK_DATA_SIZE, fileSize - off) });
   }
   return out.length === 0 ? [{ offset: 0, size: 0 }] : out;
 }

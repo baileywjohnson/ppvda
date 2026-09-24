@@ -17,13 +17,6 @@ export interface UserRow {
   created_at: string;
 }
 
-export interface DarkreelCredsRow {
-  user_id: string;
-  encrypted_data: Buffer;
-  nonce: Buffer;
-  updated_at: string;
-}
-
 export interface DarkreelDelegationRow {
   user_id: string;
   server_url: string;
@@ -103,24 +96,19 @@ export class DB {
       // Column already exists
     }
 
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS darkreel_creds (
-        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-        encrypted_data BLOB NOT NULL,
-        nonce BLOB NOT NULL,
-        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%W', 'now'))
-      );
-    `);
-
-    // darkreel_delegations replaces darkreel_creds for Shape 2. PPVDA now
-    // stores a refresh token + the user's Darkreel public key instead of a
-    // password. A full PPVDA compromise with this table leaks upload-only
+    // darkreel_delegations replaces the Shape 1 darkreel_creds table. PPVDA
+    // now stores a refresh token + the user's Darkreel public key instead of
+    // a password. A full PPVDA compromise with this table leaks upload-only
     // capability (attacker can post junk to each user's Darkreel) but NOT
     // decryption capability — PPVDA never holds the matching private key.
     //
-    // The old darkreel_creds table is left in place so existing rows aren't
-    // dropped silently; the new code paths simply don't read it. Users
-    // re-run the Connect flow to populate delegations.
+    // darkreel_creds held each user's Darkreel *password* (encrypted under
+    // their master key). Nothing reads it any more, so on upgraded installs
+    // the rows are deleted (secure_delete zeroes them in place), the table
+    // dropped, and the file vacuumed once so no free page keeps a copy.
+    // Users re-run the Connect flow to populate delegations.
+    this.dropLegacyDarkreelCreds();
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS darkreel_delegations (
         user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -144,6 +132,19 @@ export class DB {
     // Performance: index on username for login lookups
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)`);
 
+  }
+
+  private dropLegacyDarkreelCreds() {
+    const exists = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'darkreel_creds'")
+      .get();
+    if (!exists) return;
+    this.db.exec('DELETE FROM darkreel_creds');
+    this.db.exec('DROP TABLE darkreel_creds');
+    // VACUUM rewrites the database without the freed pages; the checkpoint
+    // then flushes and truncates the WAL, which still holds the old pages.
+    this.db.exec('VACUUM');
+    this.db.pragma('wal_checkpoint(TRUNCATE)');
   }
 
   close() {
@@ -220,30 +221,6 @@ export class DB {
   deleteUser(userId: string): boolean {
     const result = this.db.prepare('DELETE FROM users WHERE id = ?').run(userId);
     return result.changes > 0;
-  }
-
-  // --- Darkreel Credentials ---
-
-  getDarkreelCreds(userId: string): DarkreelCredsRow | undefined {
-    return this.db.prepare('SELECT * FROM darkreel_creds WHERE user_id = ?').get(userId) as DarkreelCredsRow | undefined;
-  }
-
-  saveDarkreelCreds(userId: string, encryptedData: Buffer, nonce: Buffer) {
-    this.db.prepare(`
-      INSERT INTO darkreel_creds (user_id, encrypted_data, nonce, updated_at)
-      VALUES (?, ?, ?, strftime('%Y-%W', 'now'))
-      ON CONFLICT(user_id) DO UPDATE SET encrypted_data = excluded.encrypted_data, nonce = excluded.nonce, updated_at = strftime('%Y-%W', 'now')
-    `).run(userId, encryptedData, nonce);
-  }
-
-  deleteDarkreelCreds(userId: string): boolean {
-    const result = this.db.prepare('DELETE FROM darkreel_creds WHERE user_id = ?').run(userId);
-    return result.changes > 0;
-  }
-
-  hasDarkreelCreds(userId: string): boolean {
-    const row = this.db.prepare('SELECT 1 FROM darkreel_creds WHERE user_id = ?').get(userId);
-    return !!row;
   }
 
   // --- Darkreel Delegations (Shape 2) ---

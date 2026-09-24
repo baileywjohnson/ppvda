@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import { SignJWT, jwtVerify } from 'jose';
@@ -14,13 +14,29 @@ import {
   PASSWORD_REQUIREMENTS,
 } from '../crypto/index.js';
 
-// --- Per-username rate limiter (matches Darkreel's AccountLimiter) ---
+// --- Per-username failure limiter (matches Darkreel's AccountLimiter) ---
 
+// Upper bounds on attacker-supplied auth fields. Real usernames are <= 64
+// characters (isValidUsername) and passwords <= 128 (isStrongPassword); the
+// login/recover limits leave headroom for accounts that predate those
+// checks while keeping every body small.
+const MAX_USERNAME_LEN = 256;
+const MAX_PASSWORD_LEN = 1024;
+
+/**
+ * Counts failed attempts per username. Only failures count, so a user who
+ * keeps logging in successfully is never locked out, and login and recover
+ * each get their own instance so hammering one can't lock the other.
+ *
+ * Keys are SHA-256 of the username rather than the raw string: the map
+ * holds up to maxEntries keys for 15 minutes, and raw attacker-chosen
+ * strings would make its memory footprint the attacker's choice.
+ */
 class AccountLimiter {
   // Map uses insertion order, which gives us free LRU semantics —
   // re-inserting an existing key moves it to the end.
-  private attempts = new Map<string, { count: number; windowStart: number }>();
-  private maxAttempts = 10;
+  private failures = new Map<string, { count: number; windowStart: number }>();
+  private maxFailures = 10;
   private windowMs = 15 * 60 * 1000; // 15 minutes
   private maxEntries = 10000;
   private cleanupInterval: NodeJS.Timeout | null = null;
@@ -32,28 +48,43 @@ class AccountLimiter {
     this.cleanupInterval.unref?.();
   }
 
-  allow(username: string): boolean {
+  private key(username: string): string {
+    return createHash('sha256').update(username, 'utf-8').digest('base64url');
+  }
+
+  /** True when this username has used up its failures for the window. */
+  isLimited(username: string): boolean {
+    const entry = this.failures.get(this.key(username));
+    if (!entry || Date.now() - entry.windowStart > this.windowMs) return false;
+    return entry.count >= this.maxFailures;
+  }
+
+  recordFailure(username: string): void {
+    const key = this.key(username);
     const now = Date.now();
-    const entry = this.attempts.get(username);
+    const entry = this.failures.get(key);
     if (!entry || now - entry.windowStart > this.windowMs) {
       // Evict oldest entry if at capacity (defense against map flooding
       // with millions of unique usernames).
-      if (this.attempts.size >= this.maxEntries) {
-        const oldest = this.attempts.keys().next().value;
-        if (oldest !== undefined) this.attempts.delete(oldest);
+      if (this.failures.size >= this.maxEntries) {
+        const oldest = this.failures.keys().next().value;
+        if (oldest !== undefined) this.failures.delete(oldest);
       }
-      this.attempts.set(username, { count: 1, windowStart: now });
-      return true;
+      this.failures.set(key, { count: 1, windowStart: now });
+      return;
     }
     entry.count++;
-    return entry.count <= this.maxAttempts;
+  }
+
+  reset(username: string): void {
+    this.failures.delete(this.key(username));
   }
 
   private cleanup(): void {
     const now = Date.now();
-    for (const [key, entry] of this.attempts) {
+    for (const [key, entry] of this.failures) {
       if (now - entry.windowStart > this.windowMs) {
-        this.attempts.delete(key);
+        this.failures.delete(key);
       }
     }
   }
@@ -65,6 +96,12 @@ class AccountLimiter {
     }
   }
 }
+
+// Stand-in recovery blob for unknown usernames. Same length as a real
+// recovery_mk (nonce 12 + key 32 + tag 16), so "no such user" costs exactly
+// one failed AES-GCM open — the same as "wrong recovery code".
+const DUMMY_RECOVERY_MK = randomBytes(60);
+const DUMMY_USER_ID = Buffer.from(randomUUID(), 'utf-8');
 
 interface AuthOpts {
   db: DB;
@@ -94,7 +131,8 @@ interface JWTPayload {
 export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
   const { db, sessions } = opts;
   const secret = new TextEncoder().encode(opts.jwtSecret);
-  const accountLimiter = new AccountLimiter();
+  const loginLimiter = new AccountLimiter();
+  const recoverLimiter = new AccountLimiter();
   // Force Secure=true whenever the deployment is served over HTTPS. Falls
   // back to NODE_ENV for operators who run without publicUrl in production
   // (behind a proxy that rewrites), so behavior never regresses.
@@ -159,13 +197,18 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
 
     // Verify user still exists
     const userId = payload.sub;
-    if (!userId || !db.getUserById(userId)) {
+    const dbUser = userId ? db.getUserById(userId) : undefined;
+    if (!dbUser) {
       reply.clearCookie('token', { path: '/' });
       reply.status(401).send({ success: false, error: 'Account no longer exists' });
       return reply;
     }
 
-    (request as any).user = payload;
+    // The admin flag comes from the DB row just read, never from the token:
+    // a JWT minted before a demotion stays valid for up to 24 h, and every
+    // route that branches on user.isAdmin (private Darkreel URLs, VPN
+    // toggle, /config) must see the demotion immediately.
+    (request as any).user = { ...payload, isAdmin: !!dbUser.is_admin };
   };
 
   // --- Admin-only preHandler ---
@@ -223,8 +266,8 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
           type: 'object',
           required: ['username', 'password'],
           properties: {
-            username: { type: 'string', minLength: 3 },
-            password: { type: 'string', minLength: 16 },
+            username: { type: 'string', minLength: 3, maxLength: 64 },
+            password: { type: 'string', minLength: 16, maxLength: MAX_PASSWORD_LEN },
           },
           additionalProperties: false,
         },
@@ -318,8 +361,8 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
           type: 'object',
           required: ['username', 'password'],
           properties: {
-            username: { type: 'string', minLength: 1 },
-            password: { type: 'string', minLength: 1 },
+            username: { type: 'string', minLength: 1, maxLength: MAX_USERNAME_LEN },
+            password: { type: 'string', minLength: 1, maxLength: MAX_PASSWORD_LEN },
           },
           additionalProperties: false,
         },
@@ -328,11 +371,12 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
     async (request, reply) => {
       const { username, password } = request.body;
 
-      // Per-username rate limit (prevents distributed brute-force)
-      if (!accountLimiter.allow(username)) {
-        // Dummy work so timing is indistinguishable
-        const dummySalt = generateSalt();
-        await deriveKey(password, dummySalt);
+      // Per-username failure limit (prevents distributed brute-force). A
+      // limited request is refused before any Argon2 runs: spending a full
+      // derivation on it would hand attackers a cheap way to tie up the
+      // libuv pool. Unknown and known usernames are limited alike, so the
+      // fast refusal says nothing about whether the account exists.
+      if (loginLimiter.isLimited(username)) {
         reply.status(401).send({ success: false, error: 'Username and/or password is incorrect.' });
         return;
       }
@@ -342,6 +386,7 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
         // Dummy Argon2id derivation to prevent timing-based username enumeration
         const dummySalt = generateSalt();
         await deriveKey(password, dummySalt);
+        loginLimiter.recordFailure(username);
         reply.status(401).send({ success: false, error: 'Username and/or password is incorrect.' });
         return;
       }
@@ -356,16 +401,19 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
           // (otherwise attackers could distinguish legacy vs migrated accounts by timing).
           const dummySalt = generateSalt();
           await deriveKey(password, dummySalt);
+          loginLimiter.recordFailure(username);
           reply.status(401).send({ success: false, error: 'Username and/or password is incorrect.' });
           return;
         }
       } else {
         // Argon2id verification
         if (!await verifyPassword(password, user.auth_salt!, user.password_hash)) {
+          loginLimiter.recordFailure(username);
           reply.status(401).send({ success: false, error: 'Username and/or password is incorrect.' });
           return;
         }
       }
+      loginLimiter.reset(username);
 
       // --- Decrypt master key ---
       const userIdBytes = Buffer.from(user.id, 'utf-8');
@@ -444,9 +492,9 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
           type: 'object',
           required: ['username', 'recoveryCode', 'newPassword'],
           properties: {
-            username: { type: 'string', minLength: 1 },
-            recoveryCode: { type: 'string', minLength: 1 },
-            newPassword: { type: 'string', minLength: 16 },
+            username: { type: 'string', minLength: 1, maxLength: MAX_USERNAME_LEN },
+            recoveryCode: { type: 'string', minLength: 1, maxLength: 128 },
+            newPassword: { type: 'string', minLength: 16, maxLength: MAX_PASSWORD_LEN },
           },
           additionalProperties: false,
         },
@@ -460,25 +508,21 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
         return;
       }
 
-      // Per-username rate limit
-      if (!accountLimiter.allow(username)) {
-        const dummySalt = generateSalt();
-        await deriveKey(newPassword, dummySalt);
+      // Per-username failure limit, separate from login's so a flood of
+      // bad recovery attempts can't lock the owner out of logging in (and
+      // vice versa). Refused before any work, as for login.
+      if (recoverLimiter.isLimited(username)) {
         reply.status(400).send({ success: false, error: 'Username and/or recovery code is incorrect.' });
         return;
       }
 
+      // Every failure below costs the same: one AES-GCM open of a 60-byte
+      // blob, no Argon2. An unknown username opens a dummy blob; a bad or
+      // malformed code opens the real one with a zero key. Previously the
+      // unknown-user path alone ran a dummy Argon2, which made "no such
+      // user" measurably slower than "wrong code".
       const user = db.getUserByUsername(username);
-      if (!user || !user.recovery_mk) {
-        // Dummy work to prevent timing-based enumeration
-        const dummySalt = generateSalt();
-        await deriveKey(newPassword, dummySalt);
-        try { decryptMasterKeyWithRecovery(Buffer.alloc(60), Buffer.alloc(32), Buffer.from('dummy')); } catch {}
-        reply.status(400).send({ success: false, error: 'Username and/or recovery code is incorrect.' });
-        return;
-      }
 
-      // Decode recovery code — always attempt decryption to prevent timing leaks
       let recoveryCode: Buffer;
       let decodeOk = true;
       try {
@@ -492,23 +536,22 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
         decodeOk = false;
       }
 
-      // Decrypt master key with recovery code
-      const userIdBytes = Buffer.from(user.id, 'utf-8');
-      let masterKey: Buffer;
+      const userIdBytes = user ? Buffer.from(user.id, 'utf-8') : DUMMY_USER_ID;
+      let masterKey: Buffer | null = null;
       try {
-        masterKey = decryptMasterKeyWithRecovery(user.recovery_mk, recoveryCode, userIdBytes);
+        masterKey = decryptMasterKeyWithRecovery(user?.recovery_mk ?? DUMMY_RECOVERY_MK, recoveryCode, userIdBytes);
       } catch {
-        zeroBuffer(recoveryCode);
-        reply.status(400).send({ success: false, error: 'Username and/or recovery code is incorrect.' });
-        return;
+        masterKey = null;
       }
       zeroBuffer(recoveryCode);
 
-      if (!decodeOk) {
-        zeroBuffer(masterKey);
+      if (!user || !user.recovery_mk || !decodeOk || !masterKey) {
+        if (masterKey) zeroBuffer(masterKey);
+        recoverLimiter.recordFailure(username);
         reply.status(400).send({ success: false, error: 'Username and/or recovery code is incorrect.' });
         return;
       }
+      recoverLimiter.reset(username);
 
       // Re-encrypt with new password
       const newAuthSalt = generateSalt();
@@ -555,8 +598,8 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
           type: 'object',
           required: ['oldPassword', 'newPassword'],
           properties: {
-            oldPassword: { type: 'string', minLength: 1 },
-            newPassword: { type: 'string', minLength: 16 },
+            oldPassword: { type: 'string', minLength: 1, maxLength: MAX_PASSWORD_LEN },
+            newPassword: { type: 'string', minLength: 16, maxLength: MAX_PASSWORD_LEN },
           },
           additionalProperties: false,
         },
@@ -668,7 +711,7 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
           type: 'object',
           required: ['password'],
           properties: {
-            password: { type: 'string', minLength: 1 },
+            password: { type: 'string', minLength: 1, maxLength: MAX_PASSWORD_LEN },
           },
           additionalProperties: false,
         },
@@ -699,10 +742,10 @@ export async function setupAuth(app: FastifyInstance, opts: AuthOpts) {
       }
 
       sessions.deleteAllForUser(userId);
-      // User-deleting cascades handle the FK child rows, but explicit deletes
-      // run first so a FK misconfiguration still leaves no dangling secrets.
-      db.deleteDarkreelCreds(userId);       // legacy password rows (Shape 1)
-      db.deleteDarkreelDelegation(userId);  // Shape 2 delegation rows
+      // User-deleting cascades handle the FK child rows, but an explicit
+      // delete runs first so a FK misconfiguration still leaves no dangling
+      // secrets.
+      db.deleteDarkreelDelegation(userId);
       db.deleteUser(userId);
 
       reply.clearCookie('token', { path: '/' }).send({ success: true });

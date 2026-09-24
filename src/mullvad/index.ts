@@ -1,10 +1,11 @@
+import { readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { generateWireGuardKeys } from './keys.js';
 import { getAccessToken, createDevice, removeDevice, listDevices, getRelayList, findRelay } from './api.js';
 import {
   startTunnel,
   stopTunnel,
   getDefaultGateway,
-  resolveBypassHost,
   addRouteExceptions,
 } from './wireguard.js';
 import type { MullvadConfig, DeviceInfo } from './types.js';
@@ -23,13 +24,111 @@ let activeDevice: DeviceInfo | null = null;
 let activeConfig: MullvadConfig | null = null;
 let switching = false;
 
+// Must match the entrypoint, which pins the same list in the supervisor.
+const MULLVAD_API_HOST = 'api.mullvad.net';
+
+// Devices this instance registered and has not yet seen removed, as
+// { id, pubkey }. Kept next to the database (a persistent, ppvda-owned
+// volume) so a crash, a failed health check or a restart loop can't leak
+// devices: the next start removes them. Holds no private key — a fresh key
+// pair is generated on every start. It is also the only thing that lets
+// PPVDA tell its own devices apart from the operator's phone or laptop on
+// the same account; nothing else is ever removed.
+interface OwnDevice { id: string; pubkey: string }
+const OWN_DEVICES_FILE = join(dirname(process.env.DB_PATH ?? './data/ppvda.db'), 'mullvad-devices.json');
+
+async function loadOwnDevices(): Promise<OwnDevice[]> {
+  try {
+    const parsed = JSON.parse(await readFile(OWN_DEVICES_FILE, 'utf-8')) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((d): d is OwnDevice =>
+      typeof d === 'object' && d !== null
+      && typeof (d as OwnDevice).id === 'string' && typeof (d as OwnDevice).pubkey === 'string');
+  } catch {
+    return [];
+  }
+}
+
+async function saveOwnDevices(devices: OwnDevice[]): Promise<void> {
+  const tmp = `${OWN_DEVICES_FILE}.tmp`;
+  await writeFile(tmp, JSON.stringify(devices), { mode: 0o600 });
+  await rename(tmp, OWN_DEVICES_FILE);
+}
+
+async function forgetOwnDevice(id: string): Promise<void> {
+  const devices = await loadOwnDevices();
+  await saveOwnDevices(devices.filter((d) => d.id !== id));
+}
+
+/**
+ * Remove devices a previous run of this instance registered but never
+ * deregistered (crash, failed startup). A device is only removed if the
+ * account still lists it with the exact public key we registered.
+ */
+async function removeStaleOwnDevices(token: string, logger: Logger): Promise<void> {
+  const own = await loadOwnDevices();
+  if (own.length === 0) return;
+  const listed = await listDevices(token);
+  const remaining: OwnDevice[] = [];
+  let removed = 0;
+  for (const dev of own) {
+    const match = listed.find((d) => d.id === dev.id && d.pubkey === dev.pubkey);
+    if (!match) continue; // already gone
+    try {
+      await removeDevice(token, dev.id);
+      removed++;
+    } catch {
+      remaining.push(dev);
+    }
+  }
+  await saveOwnDevices(remaining);
+  if (removed > 0) logger.info({ removed }, 'Removed stale Mullvad devices left by a previous run');
+  if (remaining.length > 0) logger.warn({ remaining: remaining.length }, 'Could not remove some stale Mullvad devices; will retry next start');
+}
+
+/** Deregister `device` and drop it from the own-devices file. Best-effort. */
+async function deregisterDevice(accountNumber: string, device: DeviceInfo, logger: Logger): Promise<boolean> {
+  try {
+    const token = await getAccessToken(accountNumber);
+    await removeDevice(token, device.id);
+    await forgetOwnDevice(device.id);
+    return true;
+  } catch {
+    logger.warn('Failed to deregister Mullvad device; it will be removed on the next start');
+    return false;
+  }
+}
+
+/**
+ * Ask the supervisor to route the bypass hosts around the tunnel, and
+ * register the addresses it routed as off-limits for extraction. Non-fatal:
+ * without a bypass, that host is reached through the tunnel instead.
+ */
+async function routeBypasses(bypassHosts: string[] | undefined, logger: Logger): Promise<void> {
+  const hostnames = [...new Set([MULLVAD_API_HOST, ...(bypassHosts ?? [])])];
+  try {
+    const { hosts, errors } = await addRouteExceptions(hostnames);
+    for (const h of hosts) logger.info({ host: h.hostname, ips: h.ips }, 'VPN bypass host routed');
+    for (const e of errors) logger.warn({ err: e }, 'VPN bypass host not routed');
+    registerBypasses(hosts);
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'Could not add VPN bypass routes');
+  }
+}
+
 /**
  * Set up a Mullvad VPN connection via WireGuard.
  *
  * Flow:
- * 1. Generate fresh WireGuard keys and register with Mullvad
- * 2. Fetch relay list and pick a server matching the requested location
- * 3. Generate WireGuard config and bring up the tunnel
+ * 1. Remove devices a previous run of this instance leaked
+ * 2. Fetch the relay list and pick a server for the requested location
+ * 3. Route the bypass hosts (supervisor resolves them via Docker DNS)
+ * 4. Generate fresh WireGuard keys and register a device with Mullvad
+ * 5. Bring up the tunnel — on failure, deregister the device again
+ *
+ * Everything that can fail on bad configuration happens before the device
+ * is registered, so a misconfigured container restarting under
+ * `restart: unless-stopped` doesn't add a device per attempt.
  */
 export async function setupMullvad(
   config: MullvadConfig,
@@ -38,71 +137,60 @@ export async function setupMullvad(
 ): Promise<void> {
   activeConfig = config;
 
-  // Always generate fresh keys on startup
-  logger.info('Registering new Mullvad device...');
   const token = await getAccessToken(config.accountNumber);
-  const keys = generateWireGuardKeys();
+  await removeStaleOwnDevices(token, logger);
 
-  let device: DeviceInfo;
-  try {
-    device = await createDevice(token, keys);
-  } catch (err) {
-    // If max devices reached, remove the oldest and retry
-    if (err instanceof Error && err.message.includes('MAX_DEVICES_REACHED')) {
-      logger.warn('Max Mullvad devices reached, removing oldest device...');
-      const devices = await listDevices(token);
-      if (devices.length > 0) {
-        const oldest = devices.sort((a, b) => new Date(a.created).getTime() - new Date(b.created).getTime())[0];
-        await removeDevice(token, oldest.id);
-        logger.info({ removedDevice: oldest.name }, 'Removed oldest Mullvad device');
-      }
-      device = await createDevice(token, keys);
-    } else {
-      throw err;
-    }
-  }
-
-  logger.info('Mullvad device registered');
-
-  activeDevice = device;
-
-  // Capture default gateway BEFORE tunnel overrides routing
-  const gateway = await getDefaultGateway();
-
-  // Resolve bypass hostnames BEFORE tunnel starts (while Docker DNS is available).
-  // Always include api.mullvad.net so relay list fetches and device management
-  // work after the tunnel replaces the default route.
-  const allBypassHosts = ['api.mullvad.net', ...(bypassHosts ?? [])];
-  const resolvedBypasses: Array<{ hostname: string; ips: string[] }> = [];
-  for (const host of allBypassHosts) {
-    const ips = await resolveBypassHost(host);
-    if (ips.length > 0) {
-      resolvedBypasses.push({ hostname: host, ips });
-      logger.info({ host, ips }, 'Resolved VPN bypass host');
-    } else {
-      logger.warn({ host }, 'Could not resolve VPN bypass host');
-    }
-  }
-
-  // Fetch relay list and find matching server
+  // Fetch relay list and find matching server (validates MULLVAD_LOCATION)
   logger.info('Finding Mullvad relay...');
   const relays = await getRelayList();
   const { server } = findRelay(relays, config.location);
 
-  // Ensure no stale tunnel from a previous crash/SIGKILL before starting
-  try { await stopTunnel(config.configDir); } catch { /* may not exist — fine */ }
+  // Capture default gateway BEFORE tunnel overrides routing
+  const gateway = await getDefaultGateway();
 
-  // Start the tunnel — the supervisor renders the config from typed fields.
-  await startTunnel(config.configDir, device, server, gateway);
+  // Route bypass hosts BEFORE the tunnel starts: the supervisor resolves
+  // them itself, and until the first BRINGUP Docker's DNS is still usable.
+  // api.mullvad.net is always included so device management keeps working
+  // after the tunnel replaces the default route.
+  await routeBypasses(bypassHosts, logger);
+
+  logger.info('Registering new Mullvad device...');
+  const keys = generateWireGuardKeys();
+  let device: DeviceInfo;
+  try {
+    device = await createDevice(token, keys);
+  } catch (err) {
+    // Never evict a device this instance didn't create — it may be the
+    // operator's phone. Our own leftovers were already removed above.
+    if (err instanceof Error && err.message.includes('MAX_DEVICES_REACHED')) {
+      throw new Error(
+        'Mullvad account has reached its device limit. Remove an unused device in your Mullvad account and restart PPVDA.',
+      );
+    }
+    throw err;
+  }
+  activeDevice = device;
+  try {
+    const own = await loadOwnDevices();
+    await saveOwnDevices([...own.filter((d) => d.id !== device.id), { id: device.id, pubkey: device.publicKey }]);
+  } catch {
+    logger.warn('Could not record the Mullvad device; it will not be cleaned up automatically if startup fails');
+  }
+  logger.info('Mullvad device registered');
+
+  try {
+    // Ensure no stale tunnel from a previous crash/SIGKILL before starting
+    await stopTunnel(config.configDir);
+
+    // Start the tunnel — the supervisor renders the config from typed fields.
+    await startTunnel(config.configDir, device, server, gateway);
+  } catch (err) {
+    await deregisterDevice(config.accountNumber, device, logger);
+    activeDevice = null;
+    throw err;
+  }
 
   logger.info('WireGuard tunnel is up — all traffic routed through Mullvad');
-
-  // Add route exceptions + /etc/hosts entries for bypass hosts
-  if (gateway && resolvedBypasses.length > 0) {
-    await addRouteExceptions(resolvedBypasses, gateway);
-    logger.info('VPN bypass routes added');
-  }
-  registerBypasses(resolvedBypasses);
 }
 
 /**
@@ -126,12 +214,8 @@ export async function teardownMullvad(
 
   // Deregister device before stopping tunnel
   if (activeDevice) {
-    try {
-      const token = await getAccessToken(activeConfig.accountNumber);
-      await removeDevice(token, activeDevice.id);
+    if (await deregisterDevice(activeConfig.accountNumber, activeDevice, logger)) {
       logger.info('Mullvad device deregistered');
-    } catch {
-      logger.warn('Failed to deregister Mullvad device (non-fatal)');
     }
   }
 
@@ -162,15 +246,12 @@ export async function switchMullvadCountry(
 
   try {
     // Do everything that needs the network BEFORE tearing the tunnel down:
-    // resolve bypasses (via Mullvad DNS, through the tunnel), fetch the
-    // relay list and validate the location. Previously this happened after
-    // teardown, and a bad location or API failure left no tunnel at all.
-    const allSwitchBypasses = ['api.mullvad.net', ...(bypassHosts ?? [])];
-    const resolvedBypasses: Array<{ hostname: string; ips: string[] }> = [];
-    for (const host of allSwitchBypasses) {
-      const ips = await resolveBypassHost(host);
-      if (ips.length > 0) resolvedBypasses.push({ hostname: host, ips });
-    }
+    // re-route the bypasses (hosts pinned at startup are reused; any that
+    // failed then are resolved now via Mullvad DNS, which only works while
+    // the tunnel is up), fetch the relay list and validate the location.
+    // Previously this happened after teardown, and a bad location or API
+    // failure left no tunnel at all.
+    await routeBypasses(bypassHosts, logger);
     const relays = await getRelayList();
     const { country, city, server } = findRelay(relays, location);
 
@@ -190,12 +271,6 @@ export async function switchMullvadCountry(
     activeConfig = { ...activeConfig, location };
 
     logger.info({ country: country.name, city: city.name }, 'Switched VPN country');
-
-    // Re-add bypass routes
-    if (gateway && resolvedBypasses.length > 0) {
-      await addRouteExceptions(resolvedBypasses, gateway);
-    }
-    registerBypasses(resolvedBypasses);
 
     return { country: country.name, city: city.name };
   } finally {

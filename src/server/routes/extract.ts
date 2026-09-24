@@ -9,6 +9,8 @@ import { getHttpAgent } from '../../proxy/index.js';
 import { isPrivateUrl, pinnedLookup, safeResolveHost } from '../../utils/url.js';
 import { isVpnSwitching } from '../../mullvad/index.js';
 import { resolveProxy, type VpnPermissionStore } from '../vpn-permissions.js';
+import { PerUserLimiter } from '../../utils/semaphore.js';
+import { clientGoneSignal } from './ffmpeg-concurrency.js';
 
 // HEAD an image URL and return its Content-Length. Best-effort —
 // returns undefined on any failure (non-2xx, missing header, timeout,
@@ -56,6 +58,10 @@ interface ExtractBody {
 const MAX_SSE_PER_USER = 3;
 const sseConnections = new Map<string, number>();
 
+// Same idea for the blocking /extract: each request holds (or waits for) a
+// browser slot shared by every user.
+const extractUserLimit = new PerUserLimiter(3);
+
 export async function extractRoutes(
   app: FastifyInstance,
   opts: { proxyConfig?: ProxyConfig; vpnPermissions: VpnPermissionStore; ffmpegPath: string; defaultTimeoutMs: number; defaultNetworkIdleMs: number; preferredHosts: string[]; blockedHosts: string[]; allowedHosts: string[]; preHandler?: preHandlerHookHandler },
@@ -98,19 +104,32 @@ export async function extractRoutes(
         return;
       }
 
-      const result = await extractVideos({
-        url,
-        timeoutMs: timeout ?? opts.defaultTimeoutMs,
-        networkIdleMs: opts.defaultNetworkIdleMs,
-        proxy,
-        preferredHosts: opts.preferredHosts,
-        blockedHosts: opts.blockedHosts,
-        allowedHosts: opts.allowedHosts,
-        includeImages,
-        autoPlay,
-      });
+      const releaseUser = extractUserLimit.tryAcquire(user.sub);
+      if (!releaseUser) {
+        reply.status(429).send({ success: false, error: 'Too many extractions in progress — wait for one to finish' });
+        return;
+      }
+      try {
+        // A full extraction queue throws QueueFullError (503 via the error
+        // handler); a client that disconnects cancels its queued/running
+        // extraction.
+        const result = await extractVideos({
+          url,
+          timeoutMs: timeout ?? opts.defaultTimeoutMs,
+          networkIdleMs: opts.defaultNetworkIdleMs,
+          proxy,
+          preferredHosts: opts.preferredHosts,
+          blockedHosts: opts.blockedHosts,
+          allowedHosts: opts.allowedHosts,
+          includeImages,
+          autoPlay,
+          signal: clientGoneSignal(reply),
+        });
 
-      return { success: true, data: result };
+        return { success: true, data: result };
+      } finally {
+        releaseUser();
+      }
     },
   );
 
@@ -178,8 +197,11 @@ export async function extractRoutes(
         else sseConnections.set(user.sub, count - 1);
       };
 
-      let closed = false;
-      request.raw.on('close', () => { closed = true; releaseSlot(); });
+      // Watch the response, not the request: the request stream's 'close'
+      // fires once its body is consumed, long before the client leaves.
+      const signal = clientGoneSignal(reply);
+      let closed = signal.aborted;
+      signal.addEventListener('abort', () => { closed = true; releaseSlot(); }, { once: true });
 
       function write(event: string, data: Record<string, unknown>) {
         if (closed) return;
@@ -190,63 +212,71 @@ export async function extractRoutes(
       const probePromises: Promise<void>[] = [];
       let videoIndex = 0;
 
-      await extractVideosStreaming({
-        url,
-        timeoutMs: timeout ?? opts.defaultTimeoutMs,
-        networkIdleMs: opts.defaultNetworkIdleMs,
-        proxy,
-        preferredHosts: opts.preferredHosts,
-        blockedHosts: opts.blockedHosts,
-        allowedHosts: opts.allowedHosts,
-        includeImages,
-        autoPlay,
-        onVideo: (video) => {
-          const idx = videoIndex++;
-          write('video', { ...video, _idx: idx });
+      try {
+        await extractVideosStreaming({
+          url,
+          timeoutMs: timeout ?? opts.defaultTimeoutMs,
+          networkIdleMs: opts.defaultNetworkIdleMs,
+          proxy,
+          preferredHosts: opts.preferredHosts,
+          blockedHosts: opts.blockedHosts,
+          allowedHosts: opts.allowedHosts,
+          includeImages,
+          autoPlay,
+          onVideo: (video) => {
+            const idx = videoIndex++;
+            write('video', { ...video, _idx: idx });
 
-          // Fire off enrichment in the background, then ALWAYS emit a
-          // metadata event when it settles — the frontend uses that
-          // event as the signal to clear the card's probe spinner and
-          // enable the Download / Upload buttons. Gating the emit on
-          // "did the probe produce anything" (the old behavior) meant
-          // direct image URLs — for which ffprobe has nothing useful
-          // to say — left the card stuck in the waiting state forever.
-          const isImage = video.mediaKind === 'image' || video.type === 'image';
-          const enrichP = isImage
-            ? headImageSize(video.url, proxy).then((fileSize) => ({ fileSize }))
-            : probeVideo({
-                url: video.url,
-                ffprobePath: opts.ffmpegPath.replace(/ffmpeg$/, 'ffprobe'),
-                proxyConfig: proxy,
-                timeoutMs: 10000,
-              }).then((meta) => ({
-                durationSec: meta.durationSec,
-                quality: meta.height ? qualityFromResolution(meta.width, meta.height) : undefined,
-                width: meta.width,
-                height: meta.height,
-                fileSize: meta.fileSize,
-              }));
-          const probeP = enrichP
-            .catch(() => ({} as Record<string, unknown>))
-            .then((enrichment) => {
-              if (closed) return;
-              write('metadata', { _idx: idx, ...enrichment });
-            });
-          probePromises.push(probeP);
-        },
-        onDone: async (result) => {
-          // Wait for all probes to finish before closing the stream
-          await Promise.allSettled(probePromises);
-          write('done', { pageTitle: result.pageTitle, durationMs: result.durationMs });
-          reply.raw.end();
-          releaseSlot();
-        },
-        onError: (err) => {
-          write('error', { error: err.message });
-          reply.raw.end();
-          releaseSlot();
-        },
-      });
+            // Fire off enrichment in the background, then ALWAYS emit a
+            // metadata event when it settles — the frontend uses that
+            // event as the signal to clear the card's probe spinner and
+            // enable the Download / Upload buttons. Gating the emit on
+            // "did the probe produce anything" (the old behavior) meant
+            // direct image URLs — for which ffprobe has nothing useful
+            // to say — left the card stuck in the waiting state forever.
+            const isImage = video.mediaKind === 'image' || video.type === 'image';
+            const enrichP = isImage
+              ? headImageSize(video.url, proxy).then((fileSize) => ({ fileSize }))
+              : probeVideo({
+                  url: video.url,
+                  ffprobePath: opts.ffmpegPath.replace(/ffmpeg$/, 'ffprobe'),
+                  proxyConfig: proxy,
+                  timeoutMs: 10000,
+                }).then((meta) => ({
+                  durationSec: meta.durationSec,
+                  quality: meta.height ? qualityFromResolution(meta.width, meta.height) : undefined,
+                  width: meta.width,
+                  height: meta.height,
+                  fileSize: meta.fileSize,
+                }));
+            const probeP = enrichP
+              .catch(() => ({} as Record<string, unknown>))
+              .then((enrichment) => {
+                if (closed) return;
+                write('metadata', { _idx: idx, ...enrichment });
+              });
+            probePromises.push(probeP);
+          },
+          onDone: async (result) => {
+            // Wait for all probes to finish before closing the stream
+            await Promise.allSettled(probePromises);
+            write('done', { pageTitle: result.pageTitle, durationMs: result.durationMs });
+            reply.raw.end();
+            releaseSlot();
+          },
+          onError: (err) => {
+            write('error', { error: err.message });
+            reply.raw.end();
+            releaseSlot();
+          },
+          signal,
+        });
+      } catch (err) {
+        // Queue full, or the client left while queued.
+        write('error', { error: err instanceof Error ? err.message : 'Extraction failed' });
+        reply.raw.end();
+        releaseSlot();
+      }
     },
   );
 }

@@ -73,17 +73,21 @@ async function checkRouting(): Promise<void> {
     const res = await fetch('https://am.i.mullvad.net/connected', { signal: controller.signal });
     const text = (await res.text()).toLowerCase();
     const ok = text.includes('you are connected');
+    // Never log or keep the response body: when traffic is NOT going through
+    // Mullvad it reads "You are not connected to Mullvad. Your IP address is
+    // <the server's real IP>", which would end up in `docker logs` and in
+    // the startup error below.
     if (!state.routingOk && ok) {
       logger?.info('VPN routing through Mullvad confirmed');
     }
     if (state.routingOk && !ok) {
       logger?.error(
-        { snippet: text.slice(0, 100) },
+        { connected: false },
         'VPN NOT routing through Mullvad — kill-switch engaged',
       );
     }
     state.routingOk = ok;
-    state.routingError = ok ? null : text.slice(0, 200);
+    state.routingError = ok ? null : 'am.i.mullvad.net reports traffic is not exiting via Mullvad';
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'unknown';
     if (state.routingOk) {

@@ -1,4 +1,5 @@
 import { refreshAccessToken, uploadFile, type DarkreelConnection } from '../darkreel/client.js';
+import { DarkreelError } from '../darkreel/http.js';
 
 // Shape 2 Darkreel upload hook. Replaces the previous darkreel-cli subprocess
 // spawn with a native Node implementation that speaks the sealed-box upload
@@ -19,14 +20,23 @@ import { refreshAccessToken, uploadFile, type DarkreelConnection } from '../dark
 export interface DrkUploadResult {
   success: boolean;
   error?: string;
-  detail?: string;
+  /** Machine-readable failure code — safe to log (no hostnames or bodies). */
+  code?: string;
 }
 
 export interface DrkUploadOptions {
   conn: DarkreelConnection;
+  /** From the DB at call time: admin-connected URLs may be http / private. */
+  admin: boolean;
   filePath: string;
   ffmpegPath: string;
   timeoutMs: number;
+}
+
+/** Log-safe code for any error thrown by the client. */
+function errorCode(err: unknown): string {
+  if (err instanceof DarkreelError) return err.status !== undefined ? `${err.code}_${err.status}` : err.code;
+  return 'LOCAL_ERROR';
 }
 
 /**
@@ -38,39 +48,37 @@ export interface DrkUploadOptions {
  * Returns { success: false, error: ... } on any failure; never throws.
  */
 export async function uploadToDarkreel(opts: DrkUploadOptions): Promise<DrkUploadResult> {
-  const { conn, filePath, ffmpegPath, timeoutMs } = opts;
+  const { conn, admin, filePath, ffmpegPath, timeoutMs } = opts;
 
   let accessToken: string;
   try {
-    accessToken = await refreshAccessToken(conn.serverUrl, conn.refreshToken);
+    accessToken = await refreshAccessToken(conn.serverUrl, conn.refreshToken, { admin });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : 'unknown';
+    const code = errorCode(err);
+    const dErr = err instanceof DarkreelError ? err.code : undefined;
     // Refresh-token rejection usually means the user revoked the delegation
     // from Darkreel's "Connected Apps" panel — surface that specifically so
     // the UI can prompt re-connect.
-    if (msg.includes('Refresh token rejected') || msg.includes('401')) {
-      return {
-        success: false,
-        error: 'Darkreel delegation has been revoked — reconnect from PPVDA Settings',
-      };
+    if (dErr === 'REVOKED' || dErr === 'SCOPE_MISMATCH') {
+      return { success: false, code, error: 'Darkreel delegation has been revoked — reconnect from PPVDA Settings' };
     }
-    return {
-      success: false,
-      error: 'Could not reach Darkreel server — check the server URL in Settings',
-      detail: msg,
-    };
+    // The stored URL no longer passes validation (http for a non-admin,
+    // a path, a host that now resolves to a private address, …).
+    if (dErr === 'INVALID_URL' || dErr === 'INSECURE_URL' || dErr === 'PRIVATE_HOST') {
+      return { success: false, code, error: 'The saved Darkreel server URL is no longer allowed — reconnect from PPVDA Settings using an https:// URL' };
+    }
+    return { success: false, code, error: 'Could not reach Darkreel server — check the server URL in Settings' };
   }
 
   try {
-    await uploadFile({ conn, accessToken, filePath, ffmpegPath, timeoutMs });
+    await uploadFile({ conn, admin, accessToken, filePath, ffmpegPath, timeoutMs });
     return { success: true };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : 'unknown';
     // Detect upload-endpoint scope/auth failures separately so users see
     // actionable messages rather than opaque 4xx text.
-    if (msg.includes('403')) {
-      return { success: false, error: 'Darkreel rejected the upload — the delegation may be scope-limited or revoked' };
+    if (err instanceof DarkreelError && err.code === 'HTTP_STATUS' && (err.status === 401 || err.status === 403)) {
+      return { success: false, code: errorCode(err), error: 'Darkreel rejected the upload — the delegation may be scope-limited or revoked, or storage quota is exhausted' };
     }
-    return { success: false, error: 'Darkreel upload failed', detail: msg };
+    return { success: false, code: errorCode(err), error: 'Darkreel upload failed' };
   }
 }

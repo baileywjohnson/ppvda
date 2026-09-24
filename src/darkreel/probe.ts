@@ -1,9 +1,13 @@
 import { spawn } from 'node:child_process';
+import { localInputArgs, minimalEnv } from '../downloader/ffmpeg.js';
 
 // Local-file probe for the Darkreel upload path. Different from
 // src/downloader/probe.ts (which takes URLs and uses network proxies) —
-// this one runs against a file we just wrote to disk ourselves, so SSRF
-// concerns don't apply.
+// this one runs against a file we just wrote to disk ourselves. The bytes
+// are still attacker-controlled, so the input is pinned to the file
+// protocol and a sniffed, single-input demuxer (see localInputArgs): a
+// playlist saved under a video name must not make ffprobe open other
+// files or URLs.
 //
 // Output is strictly bounded (1 MB) so a crafted media file can't exhaust
 // memory via pathological ffprobe output. Every failure mode (timeout,
@@ -40,15 +44,18 @@ export async function probeLocalFile(
     ? ffmpegPath.slice(0, -6) + 'ffprobe'
     : 'ffprobe';
 
+  const input = await localInputArgs(filePath);
+  if (!input) return {};
+
   return new Promise<LocalProbeResult>((resolve) => {
     const args = [
       '-v', 'error',
       '-print_format', 'json',
       '-show_format',
       '-show_streams',
-      filePath,
+      ...input,
     ];
-    const proc = spawn(probeBinary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn(probeBinary, args, { env: minimalEnv(), stdio: ['ignore', 'pipe', 'ignore'] });
 
     let out = '';
     let truncated = false;

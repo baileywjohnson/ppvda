@@ -2,8 +2,8 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import type { DB } from '../../db/index.js';
 import type { SessionStore } from '../../auth/sessions.js';
 import { encrypt, decrypt, zeroBuffer } from '../../crypto/index.js';
-import { isPrivateUrl } from '../../utils/url.js';
 import { exchangeCode } from '../../darkreel/client.js';
+import { DarkreelError, normalizeDarkreelOrigin, publicKeyFingerprint } from '../../darkreel/http.js';
 
 interface SettingsRouteOpts {
   db: DB;
@@ -16,8 +16,9 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
 
   // --- Darkreel connection status ---
   // Returns whether a delegation is configured and, if so, non-sensitive
-  // metadata about it (server URL and Darkreel-side user ID). Never returns
-  // the refresh token or anything derived from it.
+  // metadata about it (server URL, Darkreel-side user ID, and a fingerprint
+  // of the public key uploads are sealed to, for the user to compare with
+  // Darkreel). Never returns the refresh token or anything derived from it.
   app.get(
     '/settings/darkreel',
     { preHandler: [opts.preHandler] },
@@ -31,6 +32,7 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
           configured: true,
           server_url: row.server_url,
           darkreel_user_id: row.darkreel_user_id,
+          public_key_fingerprint: publicKeyFingerprint(row.public_key),
           connected_at: row.connected_at,
         },
       };
@@ -57,7 +59,7 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
           type: 'object',
           required: ['server_url', 'authorization_code'],
           properties: {
-            server_url: { type: 'string', minLength: 1 },
+            server_url: { type: 'string', minLength: 1, maxLength: 2048 },
             authorization_code: { type: 'string', minLength: 1, maxLength: 256 },
           },
           additionalProperties: false,
@@ -67,47 +69,48 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
     async (request, reply) => {
       const userId = (request as any).user.sub;
       const sessionId = (request as any).user.sid;
-      const isAdmin = (request as any).user.isAdmin;
+      // From the DB (see authenticate), not the JWT, so a demoted admin
+      // loses the exception immediately.
+      const isAdmin = !!(request as any).user.isAdmin;
       const { server_url, authorization_code } = request.body;
 
-      // Reuse the SSRF guard used by the old password-save route. Admins
-      // may deliberately target private/internal Darkreel deployments
-      // (same host, same LAN, Docker-internal); non-admins cannot pivot
-      // PPVDA's network position via the exchange call's fetch.
-      if (await isPrivateUrl(server_url)) {
-        if (!isAdmin) {
-          reply.status(400).send({ success: false, error: 'Private/internal server URLs are not allowed' });
-          return;
-        }
-        const hostname = (() => { try { return new URL(server_url).hostname.toLowerCase(); } catch { return ''; } })();
-        request.log.info({ userId, hostname }, 'Admin connected Darkreel to a private/internal URL');
-      }
-
-      // Basic URL shape check ahead of the fetch so typos return early.
+      // Only a bare origin is accepted and stored. https is required except
+      // for admins, who may deliberately target private/internal Darkreel
+      // deployments (same host, same LAN, Docker-internal) over plain http;
+      // non-admins can neither pivot PPVDA's network position via the
+      // exchange call nor expose the exchange to an on-path attacker who
+      // could swap in their own public key.
+      let origin: string;
       try {
-        const u = new URL(server_url);
-        if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-          reply.status(400).send({ success: false, error: 'Server URL must be http:// or https://' });
-          return;
-        }
-      } catch {
-        reply.status(400).send({ success: false, error: 'Malformed server URL' });
+        origin = normalizeDarkreelOrigin(server_url, isAdmin);
+      } catch (err) {
+        reply.status(400).send({
+          success: false,
+          error: err instanceof DarkreelError && err.code === 'INSECURE_URL'
+            ? 'Server URL must use https://'
+            : 'Server URL must be just the address, e.g. https://darkreel.example.com (no path, query or credentials)',
+        });
         return;
+      }
+      if (origin.startsWith('http:')) {
+        request.log.warn({ userId }, 'Admin connected Darkreel over plain http — the key exchange is not protected in transit');
       }
 
       // Exchange the one-shot code. Darkreel returns identical responses for
-      // "not found" and "expired" so we don't try to distinguish.
+      // "not found" and "expired" so we don't try to distinguish. The client
+      // resolves, validates and pins the host itself.
       let conn;
       try {
-        conn = await exchangeCode(server_url, authorization_code);
+        conn = await exchangeCode(origin, authorization_code, { admin: isAdmin });
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'unknown';
-        reply.status(400).send({
-          success: false,
-          error: msg.includes('fetch failed') || msg.includes('ECONN')
-            ? 'Could not reach Darkreel server — check the URL'
-            : 'Authorization code rejected — it may have expired or already been used',
-        });
+        const code = err instanceof DarkreelError ? err.code : undefined;
+        request.log.info({ userId, code: code ?? 'UNKNOWN' }, 'Darkreel code exchange failed');
+        let error = 'Authorization code rejected — it may have expired or already been used';
+        if (code === 'PRIVATE_HOST') error = 'Private/internal server URLs are not allowed';
+        else if (code === 'UNREACHABLE' || code === 'TIMEOUT') error = 'Could not reach Darkreel server — check the URL';
+        else if (code === 'SCOPE_MISMATCH') error = 'Darkreel issued a delegation that is not upload-only — refusing it';
+        else if (code === 'BAD_RESPONSE' || code === 'RESPONSE_TOO_LARGE') error = 'The server did not respond like a Darkreel server';
+        reply.status(400).send({ success: false, error });
         return;
       }
 
@@ -143,6 +146,7 @@ export async function settingsRoutes(app: FastifyInstance, opts: SettingsRouteOp
           data: {
             server_url: conn.serverUrl,
             darkreel_user_id: conn.userId,
+            public_key_fingerprint: publicKeyFingerprint(conn.publicKey),
           },
         });
       } finally {

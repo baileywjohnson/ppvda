@@ -982,6 +982,9 @@
     if (connected && data) {
       $('#dr-connected-server').textContent = data.server_url ?? '';
       $('#dr-connected-uid').textContent = (data.darkreel_user_id ?? '').slice(0, 8) + '…';
+      // Full SHA-256 hex, grouped in fours for reading aloud / comparing.
+      $('#dr-connected-fp').textContent = (data.public_key_fingerprint ?? '').replace(/(.{4})(?=.)/g, '$1 ');
+      $('#dr-insecure-warning').hidden = !(data.server_url ?? '').startsWith('http:');
       $('#dr-connected-at').textContent = data.connected_at ?? 'recently';
     }
   }

@@ -135,6 +135,8 @@
         <!-- Connected: status + disconnect -->
         <div id="dr-connected" hidden>
           <p class="settings-desc">Connected to <code id="dr-connected-server"></code> as Darkreel user <code id="dr-connected-uid"></code>.</p>
+          <p class="settings-desc settings-hint">Uploads are sealed to the public key with SHA-256 fingerprint <code id="dr-connected-fp"></code>. Compare it with the key your Darkreel account reports; if they differ, disconnect.</p>
+          <p class="settings-desc settings-hint" id="dr-insecure-warning" hidden><strong>Warning:</strong> this connection uses plain http://, so the key exchange and uploads are not protected in transit. Use https:// unless Darkreel runs on the same host or a trusted private network.</p>
           <p class="settings-desc settings-hint">Connected <span id="dr-connected-at"></span>. This connection lets PPVDA upload files to your Darkreel library but <strong>cannot</strong> read, list, delete, or modify anything — PPVDA holds only your public key.</p>
           <button type="button" id="dr-disconnect-btn" class="btn-danger">Disconnect</button>
         </div>
@@ -235,6 +237,6 @@
     </section>
   </div>
 
-  <script src="/js/app.js?v=a4d9b59759af4bb3" integrity="sha384-DS6Jbp4lEPyZ5hU0bjaM0eB6U/NJKBUaCjlaxJ0Pmz+2nCHpnJ9FFp3nTqxp2chL" crossorigin="anonymous"></script>
+  <script src="/js/app.js?v=bf77be68da3c0d7f" integrity="sha384-tWWsh9ewEh+GI3jbYkjBUnPuU+8cQlQbx5+xBcyyqQEMPzKJOTzKfjq2AKisPINL" crossorigin="anonymous"></script>
 </body>
 </html>

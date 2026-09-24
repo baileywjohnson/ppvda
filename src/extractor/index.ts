@@ -5,6 +5,7 @@ import { autoClickPlay } from './auto-play.js';
 import { ExtractionError } from '../utils/errors.js';
 import type { ProxyConfig } from '../proxy/types.js';
 import { SsrfProxy } from '../utils/ssrf-proxy.js';
+import { BoundedSemaphore } from '../utils/semaphore.js';
 import type { ExtractionResult, ExtractOptions, VideoSource } from './types.js';
 
 export type { ExtractionResult, ExtractOptions, VideoSource } from './types.js';
@@ -56,29 +57,20 @@ const STEALTH_SCRIPT = `
 `;
 
 const MAX_CONCURRENT_EXTRACTIONS = parseInt(process.env.MAX_CONCURRENT_EXTRACTIONS ?? '3', 10);
+// Extractions waiting beyond this are refused with 503 (QueueFullError)
+// instead of queueing without bound.
+const MAX_QUEUED_EXTRACTIONS = 32;
 
-class ExtractionSemaphore {
-  private running = 0;
-  private queue: Array<() => void> = [];
+const extractionSem = new BoundedSemaphore(MAX_CONCURRENT_EXTRACTIONS, MAX_QUEUED_EXTRACTIONS);
 
-  async acquire(): Promise<void> {
-    if (this.running < MAX_CONCURRENT_EXTRACTIONS) {
-      this.running++;
-      return;
-    }
-    return new Promise<void>((resolve) => {
-      this.queue.push(() => { this.running++; resolve(); });
-    });
-  }
-
-  release(): void {
-    this.running--;
-    const next = this.queue.shift();
-    if (next) next();
-  }
+/** Close the context early if the caller's signal aborts (client went away). */
+function closeOnAbort(context: BrowserContext, signal?: AbortSignal): () => void {
+  if (!signal) return () => {};
+  const onAbort = () => { context.close().catch(() => {}); };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener('abort', onAbort, { once: true });
+  return () => signal.removeEventListener('abort', onAbort);
 }
-
-const extractionSem = new ExtractionSemaphore();
 
 /**
  * Chromium's own sandbox, on unless CHROMIUM_SANDBOX=false. This browser
@@ -277,7 +269,7 @@ export async function closeBrowser(): Promise<void> {
 export async function extractVideos(
   options: ExtractOptions & { proxy?: ProxyConfig },
 ): Promise<ExtractionResult> {
-  await extractionSem.acquire();
+  await extractionSem.acquire(options.signal);
   try {
     return await extractVideosInternal(options);
   } finally {
@@ -294,6 +286,7 @@ async function extractVideosInternal(
 
   const browser = await getBrowser(options.proxy);
   const context = await createStealthContext(browser);
+  const detachAbort = closeOnAbort(context, options.signal);
   const page = await context.newPage();
 
   try {
@@ -355,6 +348,7 @@ async function extractVideosInternal(
       durationMs,
     };
   } finally {
+    detachAbort();
     await context.close().catch(() => {});
   }
 }
@@ -372,7 +366,7 @@ export async function extractVideosStreaming(
     onError: (error: Error) => void;
   },
 ): Promise<void> {
-  await extractionSem.acquire();
+  await extractionSem.acquire(options.signal);
   try {
     await extractVideosStreamingInternal(options);
   } finally {
@@ -394,6 +388,7 @@ async function extractVideosStreamingInternal(
 
   const browser = await getBrowser(options.proxy);
   const context = await createStealthContext(browser);
+  const detachAbort = closeOnAbort(context, options.signal);
   const page = await context.newPage();
 
   // Track all emitted URLs to deduplicate across network + DOM
@@ -462,6 +457,7 @@ async function extractVideosStreamingInternal(
   } catch (err) {
     options.onError(err instanceof Error ? err : new Error(String(err)));
   } finally {
+    detachAbort();
     await context.close().catch(() => {});
   }
 }

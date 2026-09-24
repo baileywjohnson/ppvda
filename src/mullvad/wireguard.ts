@@ -1,7 +1,5 @@
-import dns from 'node:dns/promises';
-import { isIPv4 } from 'node:net';
 import type { DeviceInfo, RelayServer } from './types.js';
-import { rpcAddRoutes, rpcBringup, rpcGateway, rpcTeardown } from './supervisor-rpc.js';
+import { rpcAddRoutes, rpcBringup, rpcGateway, rpcTeardown, type AddRoutesResult } from './supervisor-rpc.js';
 
 // This module used to execFile('wg-quick'/'ip'/'writeFile') directly from
 // the Node process, which meant the whole process needed CAP_NET_ADMIN and
@@ -39,10 +37,11 @@ const WG_PORT = 51820;
  *     original default gateway so the WireGuard UDP packets reach it
  *     instead of looping through the tunnel, then replaces the default
  *     route with wg0.
- *   - PreDown restores the original default route. Without a symmetric
- *     restore, country-switch / teardown leaves the container with no
- *     default route, breaking the next bring-up's relay route lookup
- *     on some kernels. `ip route replace` is idempotent.
+ *   - PreDown replaces the default route with `unreachable` rather than
+ *     restoring the real gateway, and the supervisor's kill switch blocks
+ *     everything but the tunnel, the relay handshake and the bypass hosts
+ *     either way. The relay route's next hop is the gateway the supervisor
+ *     captured at boot; `gateway` here is only its fallback.
  */
 export async function startTunnel(
   configDir: string,
@@ -97,44 +96,19 @@ export async function getDefaultGateway(): Promise<string | null> {
 }
 
 /**
- * Resolve a hostname to IPs and store the mappings.
- * Must be called BEFORE the tunnel starts (while Docker's DNS is still
- * available). Runs unprivileged in the Node process — just a DNS lookup.
+ * Route the named bypass hosts around the WireGuard tunnel. The supervisor
+ * only accepts hostnames from the allowlist the entrypoint pinned at
+ * startup (`VPN_BYPASS_HOSTS` + api.mullvad.net), resolves them itself,
+ * adds the /32 routes, kill-switch exceptions and /etc/hosts entries, and
+ * returns what it routed. Node no longer resolves or supplies addresses:
+ * any process running as the ppvda uid can reach the supervisor, so
+ * caller-supplied IPs were a hole in the kill switch.
+ *
+ * Resolution uses Docker's DNS before the first tunnel comes up and
+ * Mullvad's resolver while it is up; with the tunnel down after that, only
+ * hosts pinned earlier can be re-routed. Call it before BRINGUP at startup
+ * and before TEARDOWN on a country switch.
  */
-export async function resolveBypassHost(hostname: string): Promise<string[]> {
-  // If it's already a valid IPv4 literal, return it directly. Use Node's
-  // net.isIPv4 rather than a permissive regex so out-of-range octets are
-  // rejected before they reach the supervisor's `ip route add` argv.
-  if (isIPv4(hostname)) {
-    return [hostname];
-  }
-
-  try {
-    // Use dns.lookup which checks /etc/hosts first (where Docker puts host.docker.internal)
-    const { address } = await dns.lookup(hostname);
-    return [address];
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Add route exceptions so traffic to specific IPs bypasses the WireGuard
- * tunnel, and write /etc/hosts entries so the hostnames resolve after
- * VPN DNS takes over. Both halves happen inside the supervisor — `ip
- * route add` needs CAP_NET_ADMIN and /etc/hosts writes need root. Input
- * validation (hostname charset, IPv4 shape) is re-checked on the
- * supervisor side too so a bug here can't smuggle malformed values into
- * privileged argv.
- */
-export async function addRouteExceptions(
-  hosts: Array<{ hostname: string; ips: string[] }>,
-  gateway: string,
-): Promise<void> {
-  try {
-    await rpcAddRoutes(gateway, hosts);
-  } catch {
-    // Non-fatal — best-effort; a failure here just means hostname lookups
-    // go through VPN DNS instead of resolving locally.
-  }
+export async function addRouteExceptions(hostnames: string[]): Promise<AddRoutesResult> {
+  return rpcAddRoutes(hostnames);
 }

@@ -90,10 +90,17 @@ Jobs run with a configurable concurrency semaphore. Each stage updates the job s
 
 ## Deploy
 
-### One command on a fresh VPS
+### Setup script on a fresh VPS
+
+The script runs as root, so check what you're running first: clone, verify the newest release tag against the maintainer's SSH release key (obtained through a channel you trust — not from this repository), check it out, read the script, then run it. Don't pipe it from the network into a shell (its prompts need a terminal anyway).
 
 ```bash
 git clone https://github.com/baileywjohnson/ppvda.git && cd ppvda
+git tag -l 'v*' --sort=-v:refname | head -1        # newest release, e.g. v1.2.3
+echo "release-signer ssh-ed25519 AAAA..." > /tmp/ppvda_signers
+git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile=/tmp/ppvda_signers verify-tag v1.2.3 \
+  && git checkout v1.2.3
+less setup.sh
 sudo ./setup.sh
 ```
 
@@ -105,6 +112,9 @@ The script prompts for:
 - **Darkreel server URL** (optional, for encrypted uploads)
 - **SSH user** (optional, for secure remote access)
 - **Access log privacy** (optional, disables Caddy request logs)
+- **Release signer SSH key** (optional, unless already pinned in `/etc/ppvda/allowed_signers`) — pinned there and used both to pick the code to build and by the auto-updater
+
+Setup builds the newest `vX.Y.Z` tag whose signature verifies against the pinned key. With no key pinned, or no signed release yet, it builds the current checkout and says loudly that it is unverified.
 
 Takes about 5 minutes. When it's done you'll see:
 
@@ -118,13 +128,13 @@ Takes about 5 minutes. When it's done you'll see:
 | **Firewall** | UFW: SSH, HTTP, HTTPS only. All other ports denied. |
 | **Brute-force protection** | fail2ban auto-bans repeated SSH failures |
 | **SSH hardening** | Optional personal user with sudo, root login disabled |
-| **Docker** | Docker + Compose installed and enabled |
+| **Docker** | Docker + Compose installed from Docker's apt repository (signing key checked against its published fingerprint) |
 | **Application** | PPVDA container with Chromium, ffmpeg, WireGuard |
 | **Reverse proxy** | Caddy, always installed. With a domain: automatic Let's Encrypt TLS. Without one: plain HTTP on :80. The app itself binds loopback only, so Caddy is the sole ingress and UFW actually governs the exposed port. |
 | **Access log privacy** | Optional: Caddy access logs discarded (no IP/URL logging) |
 | **VPN** | Mullvad WireGuard tunnel (if account provided) |
 | **Database backups** | Daily encrypted backup at 3 AM (AES-256-CBC, 30-day retention) |
-| **Credential security** | Admin password shredded after bootstrap; `.env` is mode 600 |
+| **Credential security** | Admin password shredded after bootstrap and the container recreated without it (so it's gone from `docker inspect`); `.env` is mode 600 |
 
 ### Docker (manual)
 
@@ -171,10 +181,13 @@ npm run dev
 
 The Docker container uses `NET_ADMIN` capability and `/dev/net/tun` for WireGuard. Only the privileged `wg-supervisor` helper exercises those capabilities — the main Node process runs as the unprivileged `ppvda` user and talks to the supervisor over a Unix socket for tunnel operations (see [Privilege split](#privilege-split) below). When a Mullvad account is configured, PPVDA:
 
-1. Generates fresh WireGuard keys on every startup (nothing persisted to disk)
-2. Registers a device with the Mullvad API
-3. Brings up a WireGuard tunnel routing all traffic through the selected country
-4. On shutdown, deregisters the device from Mullvad
+1. Removes any Mullvad device a previous run of this instance registered but never deregistered (crash, failed start)
+2. Picks a relay for `MULLVAD_LOCATION` and routes the bypass hosts — before registering anything, so a bad location doesn't cost a device
+3. Generates fresh WireGuard keys and registers a device with the Mullvad API (the private key is never written to disk)
+4. Brings up a WireGuard tunnel routing all traffic through the selected country — if that fails, the device is deregistered again
+5. On shutdown, deregisters the device from Mullvad
+
+PPVDA only ever removes devices it registered itself, recognised by id and public key (kept in `mullvad-devices.json` next to the database). If the account is at Mullvad's device limit, startup fails with a message instead of evicting a device — which might be your phone.
 
 If your Darkreel server is on a different host, add it to `VPN_BYPASS_HOSTS` so uploads go direct:
 
@@ -182,15 +195,17 @@ If your Darkreel server is on a different host, add it to `VPN_BYPASS_HOSTS` so 
 VPN_BYPASS_HOSTS=media.example.com
 ```
 
+The bypass list is fixed when the container starts: the entrypoint hands it (plus `api.mullvad.net`) to `wg-supervisor`, which resolves each name itself — IPv4 only, and every address must be public unicast (a same-host Darkreel should be listed by its public name, not reached via `host.docker.internal`). Changing it takes a container restart.
+
 Admins can switch VPN countries and manage per-user VPN permissions from the admin panel without restarting the container.
 
 ### Privilege split
 
 The Node process (and everything it spawns — Playwright, Chromium, ffmpeg, ffprobe) always runs as the unprivileged `ppvda` user, in both the bare and the Mullvad deployments. This lets Chromium's user-namespace sandbox work, so a renderer bug lands in a confined process instead of container root.
 
-In the Mullvad deployment, the operations that genuinely require `CAP_NET_ADMIN` — `wg-quick up`/`down`, `ip route add`, writing `/etc/resolv.conf` and `/etc/hosts` — are handled by a small privileged helper called **`wg-supervisor`**, written in Go (see [`wg-supervisor/`](wg-supervisor/)). The supervisor runs as root and listens on a Unix socket at `/run/ppvda/wg.sock`; the Node process sends length-prefixed JSON RPCs for four fixed operations (`BRINGUP`, `TEARDOWN`, `ADD_ROUTES`, `GATEWAY`). The supervisor authenticates every incoming connection via `SO_PEERCRED` and only accepts peers with the `ppvda` uid. No HTTP, no network listeners, no user input beyond the RPC payload.
+In the Mullvad deployment, the operations that genuinely require `CAP_NET_ADMIN` — `wg-quick up`/`down`, `ip route add`, writing `/etc/resolv.conf` and `/etc/hosts` — are handled by a small privileged helper called **`wg-supervisor`**, written in Go (see [`wg-supervisor/`](wg-supervisor/)). The supervisor runs as root and listens on a Unix socket at `/run/ppvda/wg.sock`; the Node process sends length-prefixed JSON RPCs for four fixed operations (`BRINGUP`, `TEARDOWN`, `ADD_ROUTES`, `GATEWAY`). The supervisor authenticates every incoming connection via `SO_PEERCRED` and only accepts peers with the `ppvda` uid. No HTTP, no network listeners, no user input beyond the RPC payload. `ADD_ROUTES` takes hostnames only, and only those on the bypass list pinned at container start; the supervisor resolves them itself.
 
-What this changes for the threat model: a Chromium renderer RCE (V8 bug, image codec bug, etc. — Chromium gets a couple of these a year) used to land in a root process with `NET_ADMIN` and could defeat the VPN kill-switch, edit `/etc/hosts`, or modify the routing table. Now it lands in an unprivileged process that can still read what the app can read (same uid) but cannot touch network configuration without also escaping Chromium's renderer sandbox *and* the kernel's user namespace.
+What this changes for the threat model: a Chromium renderer RCE (V8 bug, image codec bug, etc. — Chromium gets a couple of these a year) used to land in a root process with `NET_ADMIN` and could defeat the VPN kill-switch, edit `/etc/hosts`, or modify the routing table. Now it lands in an unprivileged process that can still read what the app can read (same uid) but cannot touch network configuration without also escaping Chromium's renderer sandbox *and* the kernel's user namespace. Code that does run as the `ppvda` uid (a full sandbox escape, or an ffmpeg bug) can reach the supervisor, but can't route an address of its choice around the tunnel or lift the kill switch; it can tear the tunnel down (denial of service only — the kill switch stays) or bring it up against an endpoint of its choosing, which reveals the server's real IP to that endpoint. See [SECURITY.md](SECURITY.md).
 
 The bare deployment (no `MULLVAD_ACCOUNT`) doesn't start the supervisor and skips the socket entirely — Node just runs directly as `ppvda` since no privileged ops are needed.
 
@@ -295,7 +310,7 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
 - **Cookie security** — httpOnly, SameSite=strict, and Secure whenever the deployment URL (`PUBLIC_URL`) is HTTPS (falls back to `NODE_ENV === 'production'` for proxy-rewrite setups without `PUBLIC_URL`). No tokens in localStorage or query parameters
 - **Minimal subprocess environment** — ffmpeg receives only PATH, HOME, and TMPDIR. Secrets like JWT_SECRET and MULLVAD_ACCOUNT are not leaked
 - **Security headers** — CSP, HSTS, Permissions-Policy, X-Frame-Options, X-Content-Type-Options, Referrer-Policy on all responses
-- **VPN bypass validation** — Hostnames and IPs in `VPN_BYPASS_HOSTS` validated before writing to system routes and `/etc/hosts`
+- **VPN bypass pinning** — The hosts in `VPN_BYPASS_HOSTS` (plus the Mullvad API) are fixed when the container starts and resolved by the privileged supervisor itself; only public IPv4 addresses are routed, and nothing running as the app user can add others
 - **No request logging** — URLs never appear in server logs. Rate limiting and session state are in-memory only and cleared on restart
 - **Coarsened timestamps** — Database timestamps use year-week precision (`strftime('%Y-%W')`) matching Darkreel's approach. In-memory job timestamps rounded to the minute
 - **Secure file deletion** — Downloaded media files overwritten with random data and fsynced before unlinking. **Caveat:** this is a defense-in-depth pass, not a forensic guarantee on modern filesystems — CoW (Btrfs/ZFS/APFS) and SSD wear-levelling mean the overwrite may not reach the original blocks. See [SECURITY.md](./SECURITY.md) for the recommended tmpfs-backed `DOWNLOAD_DIR` + full-disk-encryption posture
@@ -304,7 +319,7 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
 - **Memory security** — Master keys, derived keys, and passwords zeroed from memory immediately after use. Session cleanup runs every 60 seconds
 - **Bootstrap credential cleanup** — Admin password stored in a separate bootstrap file during setup, shredded after the first health check. Never persists in `.env`. If the admin recovery code file (`admin-recovery-code.txt`) is not deleted manually after first run, the server logs a WARN on every startup reminding the operator to remove it
 - **Encrypted database backups** — Daily backups encrypted with AES-256-CBC and a randomly generated key, 30-day retention
-- **Protocol restriction** — ffmpeg and ffprobe inputs restricted to http/https protocols, blocking `file://`, `gopher://`, `concat:`, etc.
+- **Protocol restriction** — ffmpeg and ffprobe inputs restricted to http/https protocols, blocking `file://`, `gopher://`, `concat:`, etc. Downloaded files are re-read (remux, thumbnail, probe) with `-protocol_whitelist file` and a demuxer forced from the file's magic bytes (mp4/mov, mkv/webm, avi, flv, asf, mpeg-ts, jpeg/png/gif/webp/bmp); anything else — including playlists or concat scripts saved under a video name — is never handed to ffmpeg
 - **Legacy migration** — Users created with older scrypt/PBKDF2 auth are transparently upgraded to Argon2id + AAD on next login
 - **SRI integrity** — Frontend JS and CSS loaded with subresource integrity hashes
 - **JWT secret entropy** — `JWT_SECRET` is validated at startup for length AND Shannon entropy, so placeholder values like `"a" * 32` are rejected instead of silently enabling trivially-forgeable tokens
@@ -355,7 +370,9 @@ To set up:
 
 Revoke access anytime from Darkreel's **Settings → Connected Apps** (server-side) or PPVDA's **Settings → Darkreel Integration → Disconnect** (local only). A Darkreel-side revoke takes effect on PPVDA's next upload attempt (within 1 hour of access-token expiry).
 
-Private/internal server URLs (`127.0.0.1`, `192.168.*`, `.internal` / `.local` hostnames, RFC1918 ranges) are allowed only for admin users, since they let PPVDA pivot its network position on the deployment host. Regular users must use a public URL or hostname.
+The server URL must be a bare origin (`https://darkreel.example.com` — no path, query or credentials) and must use `https://`. Private/internal server URLs (`127.0.0.1`, `192.168.*`, `.internal` / `.local` hostnames, RFC1918 ranges) and plain `http://` are allowed only for admin users, since they let PPVDA pivot its network position on the deployment host and expose the key exchange in transit. The URL is re-validated, resolved once and DNS-pinned on every exchange, refresh and upload, and the policy follows the user's *current* admin status.
+
+After connecting, Settings shows the SHA-256 fingerprint of the public key PPVDA seals your uploads to. Compare it with the fingerprint Darkreel shows under Settings → Connected Apps (same SHA-256, same grouping); a mismatch means the key was swapped in transit — disconnect and revoke.
 
 ## API
 
@@ -463,7 +480,8 @@ All configuration is via environment variables (or `.env` file).
 | `BROWSER_TIMEOUT_MS` | `30000` | Page load timeout |
 | `NETWORK_IDLE_MS` | `2000` | Wait for network idle before finishing extraction |
 | `DOWNLOAD_TIMEOUT_MS` | `300000` | Download timeout (5 min) |
-| `MAX_DOWNLOAD_BYTES` | `10737418240` | Max bytes per direct/image download (10 GB). Prevents disk exhaustion from infinite or misconfigured upstream responses. Enforced via `Content-Length` check + streaming byte counter. |
+| `MAX_DOWNLOAD_BYTES` | `10737418240` | Max bytes per download (10 GB). Prevents disk exhaustion from infinite or misconfigured upstream responses. Direct/image downloads: `Content-Length` check + streaming byte counter. HLS/DASH and `/stream-download`: ffmpeg `-fs`; hitting the cap fails the download rather than keeping a truncated file. |
+| `MAX_DOWNLOAD_DURATION_SEC` | `21600` | Longest HLS/DASH/stream download accepted (6 h). Live streams (no total duration) are always refused. |
 
 ### Proxy
 
@@ -489,7 +507,7 @@ Comma-separated domain lists with subdomain matching.
 | `MULLVAD_ACCOUNT` | Mullvad account number |
 | `MULLVAD_LOCATION` | Country code (`se`) or country-city (`se-mma`, `us-nyc`) |
 | `MULLVAD_CONFIG_DIR` | Ignored. The WireGuard config (private key) is kept by `wg-supervisor` in its root-only `/run/wg-supervisor` |
-| `VPN_BYPASS_HOSTS` | Comma-separated hostnames to route outside the VPN |
+| `VPN_BYPASS_HOSTS` | Comma-separated hostnames (or public IPv4 addresses) to route outside the VPN. Fixed at container start; must resolve to public IPv4 addresses |
 
 ### Features
 
@@ -527,6 +545,7 @@ sudo ./setup.sh
 # On your download server (e.g., privacy-friendly VPS)
 git clone https://github.com/baileywjohnson/ppvda.git
 cd ppvda
+# verify and check out the newest signed release first — see "Deploy" above
 sudo ./setup.sh
 # Follow prompts — enter your Mullvad account and Darkreel URL
 ```

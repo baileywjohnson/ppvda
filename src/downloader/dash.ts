@@ -7,6 +7,8 @@ export interface DashDownloadOptions {
   ffmpegPath: string;
   proxyConfig?: ProxyConfig;
   timeoutMs?: number;
+  maxBytes?: number;
+  maxDurationSec?: number;
 }
 
 /**
@@ -19,5 +21,7 @@ export async function downloadDash(options: DashDownloadOptions) {
     ffmpegPath: options.ffmpegPath,
     proxyConfig: options.proxyConfig,
     timeoutMs: options.timeoutMs,
+    maxBytes: options.maxBytes,
+    maxDurationSec: options.maxDurationSec,
   });
 }

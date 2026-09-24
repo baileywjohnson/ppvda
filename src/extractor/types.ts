@@ -29,4 +29,6 @@ export interface ExtractOptions {
   allowedHosts?: string[];
   includeImages?: boolean;
   autoPlay?: boolean;
+  /** Aborting drops a queued extraction and closes a running one's browser context. */
+  signal?: AbortSignal;
 }

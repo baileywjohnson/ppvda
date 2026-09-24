@@ -3,9 +3,9 @@
 // wg-supervisor is a tiny privileged helper that owns the subset of PPVDA's
 // operations that require CAP_NET_ADMIN or root-owned filesystem paths —
 // bringing the WireGuard tunnel up/down, editing /etc/resolv.conf, and
-// adding per-host bypass routes. It speaks a length-prefixed JSON protocol
-// over a Unix socket so the unprivileged PPVDA Node process can request
-// these operations without running as root itself.
+// routing a fixed set of bypass hosts around the tunnel. It speaks a
+// length-prefixed JSON protocol over a Unix socket so the unprivileged PPVDA
+// Node process can request these operations without running as root itself.
 //
 // Design constraints:
 //
@@ -23,9 +23,16 @@
 //
 //   - Frames are size-capped to 64 KiB so a bug on the PPVDA side can't
 //     drive us into unbounded allocation.
+//
+//   - SO_PEERCRED proves the peer is the ppvda uid, not that it is the Node
+//     process: Chromium (after a sandbox escape) and ffmpeg run as that uid
+//     too. So nothing a caller supplies may widen what leaves the host
+//     outside the tunnel. The bypass hosts are fixed by -bypass-hosts at
+//     startup and resolved here; ADD_ROUTES only picks from that list.
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
@@ -35,6 +42,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -53,6 +61,13 @@ const (
 	defaultSocketPath = "/run/ppvda/wg.sock"
 	defaultConfigDir  = "/run/wg-supervisor"
 	wgInterface       = "wg0"
+	// mullvadDNS is Mullvad's in-tunnel resolver, reachable only over wg0.
+	mullvadDNS = "10.64.0.1"
+	// Bounds on the pinned bypass set, so a hostile resolver answer can't
+	// grow the kill switch or the routing table without limit.
+	maxBypassHosts      = 16
+	maxBypassIPsPerHost = 8
+	dnsTimeout          = 10 * time.Second
 )
 
 // configDir is the ONLY directory the supervisor will write a WireGuard
@@ -82,6 +97,25 @@ var (
 	relayEndpoint string
 	// bypassIPs accumulates every IP ADD_ROUTES has routed around the tunnel.
 	bypassIPs = map[string]bool{}
+
+	// bypassAllow is the set of hostnames (or IPv4 literals) ADD_ROUTES may
+	// route around the tunnel. It comes from -bypass-hosts and is fixed for
+	// the life of the process: a caller can only choose among these, never
+	// add to them.
+	bypassAllow = map[string]bool{}
+	// pinnedHosts maps each routed bypass host to the addresses the
+	// supervisor resolved for it. A host is resolved once; later ADD_ROUTES
+	// calls (country switches) reuse the pinned addresses, which are also
+	// what /etc/hosts points the app at.
+	pinnedHosts = map[string][]string{}
+	// tunnelUp is true between a successful BRINGUP and the next TEARDOWN.
+	// It decides which resolver ADD_ROUTES may use — see bypassResolver.
+	tunnelUp bool
+	// bootResolvConf is /etc/resolv.conf as Docker wrote it, restored on
+	// TEARDOWN so the pre-tunnel resolver is whatever this network actually
+	// provides (127.0.0.11 on compose networks, host resolvers on the
+	// default bridge).
+	bootResolvConf []byte
 )
 
 type request struct {
@@ -103,14 +137,20 @@ type request struct {
 	PeerAllowedIPs string `json:"peerAllowedIPs,omitempty"` // exact "0.0.0.0/0" or "::/0"
 	RelayIP        string `json:"relayIP,omitempty"`        // IPv4 of the relay endpoint, for bypass route
 
-	// ADD_ROUTES (and shared with BRINGUP for the PostUp/PreDown gateway):
-	// adds `ip route add <ip>/32 via <gateway>` for each (host, ip) pair and
-	// appends unique `<ip> <host>` lines to /etc/hosts.
-	Gateway string       `json:"gateway,omitempty"`
-	Hosts   []hostBypass `json:"hosts,omitempty"`
+	// Gateway is only a fallback for when the boot-time default gateway
+	// could not be captured; bootGateway is used whenever it is known.
+	Gateway string `json:"gateway,omitempty"`
+
+	// ADD_ROUTES: hostnames to route around the tunnel. Each must be in the
+	// -bypass-hosts allowlist; the supervisor resolves them itself and the
+	// caller never supplies addresses.
+	Hostnames []string `json:"hostnames,omitempty"`
 }
 
-type hostBypass struct {
+// routedHost is one entry of ADD_ROUTES' reply: the addresses the
+// supervisor routed for an allowlisted host. PPVDA needs them to refuse
+// those IPs as extraction targets (src/utils/url.ts:setVpnBypassIPs).
+type routedHost struct {
 	Hostname string   `json:"hostname"`
 	IPs      []string `json:"ips"`
 }
@@ -122,12 +162,12 @@ type response struct {
 }
 
 var (
-	// hostnameRe and ipv4Re match the same shapes PPVDA's wireguard.ts already
-	// validated against before sending — re-validating here keeps the
-	// supervisor the single source of truth for what gets into privileged
-	// subprocess argv, so a bug in PPVDA can't smuggle a malformed value.
-	hostnameRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
-	ipv4Re     = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`)
+	// dnsNameRe is the shape of a bypass hostname: dot-separated LDH labels
+	// (lower-cased before matching). ipv4Re re-validates addresses the
+	// caller supplies, so the supervisor stays the single source of truth
+	// for what gets into privileged subprocess argv.
+	dnsNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
+	ipv4Re    = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`)
 
 	// WireGuard base64 keys are 32 raw bytes → 44 chars padded base64; the
 	// last char is always '=' for a 32-byte input.
@@ -141,6 +181,7 @@ func main() {
 	socketPath := flag.String("socket", defaultSocketPath, "path to the Unix socket PPVDA will connect to")
 	allowUIDStr := flag.String("uid", "", "numeric uid permitted to connect (required)")
 	configDirFlag := flag.String("config-dir", defaultConfigDir, "the only directory wg0.conf may be written to")
+	bypassHostsFlag := flag.String("bypass-hosts", "", "comma-separated hostnames (or public IPv4 literals) ADD_ROUTES may route around the tunnel")
 	flag.Parse()
 
 	if !filepath.IsAbs(*configDirFlag) {
@@ -157,6 +198,23 @@ func main() {
 	allowUID, err := strconv.Atoi(*allowUIDStr)
 	if err != nil || allowUID < 0 {
 		log.Fatalf("-uid %q is not a valid uid", *allowUIDStr)
+	}
+
+	allow, err := parseBypassAllowlist(*bypassHostsFlag)
+	if err != nil {
+		log.Fatalf("-bypass-hosts: %v", err)
+	}
+	bypassAllow = allow
+	names := make([]string, 0, len(allow))
+	for h := range allow {
+		names = append(names, h)
+	}
+	log.Printf("bypass allowlist: %s", strings.Join(names, ", "))
+
+	if b, err := os.ReadFile("/etc/resolv.conf"); err == nil && len(b) > 0 {
+		bootResolvConf = b
+	} else {
+		bootResolvConf = []byte("nameserver " + dockerDNS + "\n")
 	}
 
 	if gw, err := liveGateway(); err == nil && gw != "" {
@@ -318,6 +376,12 @@ func doBringup(r request) response {
 	if !ipv4Re.MatchString(r.Gateway) {
 		return response{Error: "invalid gateway"}
 	}
+	// The relay route's next hop is the gateway captured at boot; the
+	// caller's value is only a fallback for when that capture failed.
+	gateway := bootGateway
+	if gateway == "" {
+		gateway = r.Gateway
+	}
 
 	// Render the config from a fixed template. Every interpolation point is
 	// a value that has just passed a tight regex / set-membership check, so
@@ -329,13 +393,13 @@ func doBringup(r request) response {
 		"Address = " + r.Address + "\n" +
 		"DNS = " + r.DNS + "\n" +
 		"Table = off\n" +
-		"PostUp = ip route add " + r.RelayIP + "/32 via " + r.Gateway +
+		"PostUp = ip route add " + r.RelayIP + "/32 via " + gateway +
 		" && ip route replace default dev " + wgInterface + "\n" +
 		// On teardown the default route becomes unreachable rather than
 		// reverting to the real gateway: with the tunnel down, nothing
 		// should have a route out except the explicit /32 bypasses.
 		"PreDown = ip route replace unreachable default" +
-		" ; ip route del " + r.RelayIP + "/32 via " + r.Gateway + "\n" +
+		" ; ip route del " + r.RelayIP + "/32 via " + gateway + "\n" +
 		"\n" +
 		"[Peer]\n" +
 		"PublicKey = " + r.PeerPublicKey + "\n" +
@@ -365,18 +429,29 @@ func doBringup(r request) response {
 	}
 
 	// Docker manages /etc/resolv.conf; override it so queries use the
-	// Mullvad resolver through the tunnel. Best-effort: if it fails, DNS
-	// falls back to Docker's embedded resolver (still functional, less
-	// private).
-	_ = os.WriteFile("/etc/resolv.conf", []byte("nameserver 10.64.0.1\n"), 0o644)
+	// Mullvad resolver through the tunnel. This is not best-effort: left
+	// pointing at Docker's resolver, lookups either leak to the host's
+	// resolver (if anything ever lets them through) or silently fail
+	// against the kill switch. Take the tunnel back down and report it.
+	if err := os.WriteFile("/etc/resolv.conf", []byte("nameserver "+mullvadDNS+"\n"), 0o644); err != nil {
+		_, _ = runCmd("wg-quick", "down", configPath)
+		return response{Error: "write /etc/resolv.conf: " + err.Error() + " (tunnel taken back down)"}
+	}
+	tunnelUp = true
 
 	return response{OK: true}
 }
 
-// doTeardown runs `wg-quick down <path>`, restores Docker's embedded DNS
-// resolver, and securely unlinks the config file (which contains the
+// doTeardown runs `wg-quick down <path>`, restores Docker's DNS resolver
+// configuration, and securely unlinks the config file (which contains the
 // WireGuard private key). Best-effort throughout — the tunnel may already
 // be down from a prior country-switch.
+//
+// Any ppvda-uid process can call this, not just Node. That is tolerated
+// rather than removed (a country switch is TEARDOWN + BRINGUP): once the
+// kill switch is installed it is never lifted, so a hostile TEARDOWN only
+// takes egress down — a denial of service the same uid can already cause by
+// killing Node — and cannot expose the real IP.
 func doTeardown(r request) response {
 	// Same as doBringup: the caller's configDir is ignored in favour of the
 	// pinned one, so teardown always targets the file we actually wrote.
@@ -384,59 +459,97 @@ func doTeardown(r request) response {
 
 	// Ignore errors — tunnel may not exist
 	_, _ = runCmd("wg-quick", "down", configPath)
+	tunnelUp = false
 
-	// Restore Docker's embedded resolver. Without this, /etc/resolv.conf
-	// still points at 10.64.0.1 (unreachable once the tunnel is down) and
-	// every DNS query after teardown times out.
-	_ = os.WriteFile("/etc/resolv.conf", []byte("nameserver 127.0.0.11\n"), 0o644)
+	// Restore the resolver config Docker provided. Without this,
+	// /etc/resolv.conf still points at 10.64.0.1 (unreachable once the
+	// tunnel is down) and every DNS query after teardown times out. With
+	// the kill switch installed these queries are rejected anyway; before
+	// the first BRINGUP (PPVDA's stale-tunnel cleanup) they must keep
+	// working.
+	_ = os.WriteFile("/etc/resolv.conf", bootResolvConf, 0o644)
 
 	secureUnlink(configPath)
 
 	return response{OK: true}
 }
 
-// doAddRoutes writes `ip route add <ip>/32 via <gateway>` for each
-// validated (host, ip) pair and appends unique `<ip> <hostname>` lines to
-// /etc/hosts. Validation regexes are applied here too so a malformed
-// value can never reach argv.
+// doAddRoutes routes the requested bypass hosts around the tunnel and
+// returns the addresses it routed. Hosts must come from the -bypass-hosts
+// allowlist and are resolved here: the caller names hosts, never IPs.
+// Accepting caller IPs let any ppvda-uid process (Chromium after a sandbox
+// escape, ffmpeg) exempt an address of its choice from the kill switch and
+// learn the real IP by connecting to it.
+//
+// Each host is resolved once and pinned (routes, kill-switch rule and an
+// /etc/hosts line, so the app connects to exactly the routed addresses).
+// A refused or unresolvable host is reported in "errors" and skipped; the
+// others are still routed.
 func doAddRoutes(r request) response {
-	if !ipv4Re.MatchString(r.Gateway) {
-		return response{Error: "invalid gateway"}
+	gateway := bootGateway
+	if gateway == "" {
+		if !ipv4Re.MatchString(r.Gateway) {
+			return response{Error: "no default gateway known"}
+		}
+		gateway = r.Gateway
+	}
+	if len(r.Hostnames) == 0 {
+		return response{Error: "no hostnames"}
+	}
+	if len(r.Hostnames) > maxBypassHosts {
+		return response{Error: "too many hostnames"}
 	}
 
-	// Build unique entries first so we can dedupe against the existing
-	// /etc/hosts in one read.
-	existing, _ := os.ReadFile("/etc/hosts")
-	existingStr := string(existing)
-
-	var newEntries []string
-	for _, h := range r.Hosts {
-		if !hostnameRe.MatchString(h.Hostname) {
+	type reply struct {
+		Hosts  []routedHost `json:"hosts"`
+		Errors []string     `json:"errors,omitempty"`
+	}
+	out := reply{Hosts: []routedHost{}}
+	var done []string
+	for _, raw := range r.Hostnames {
+		host := strings.ToLower(strings.TrimSpace(raw))
+		if contains(done, host) {
 			continue
 		}
-		for _, ip := range h.IPs {
-			if !ipv4Re.MatchString(ip) {
+		done = append(done, host)
+		if !bypassAllow[host] {
+			if len(host) > 64 {
+				host = host[:64] + "..."
+			}
+			out.Errors = append(out.Errors, fmt.Sprintf("%q: not in the -bypass-hosts allowlist", host))
+			continue
+		}
+
+		ips, pinned := pinnedHosts[host]
+		if !pinned {
+			var err error
+			if ips, err = resolveBypassHost(host); err != nil {
+				out.Errors = append(out.Errors, host+": "+err.Error())
 				continue
 			}
-			// Best-effort route add — may already exist.
-			_, _ = runCmd("ip", "route", "add", ip+"/32", "via", r.Gateway)
-			bypassIPs[ip] = true
-
-			entry := ip + " " + h.Hostname
-			lineRe := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(entry) + `\s*$`)
-			if !lineRe.MatchString(existingStr) && !contains(newEntries, entry) {
-				newEntries = append(newEntries, entry)
+		}
+		var routeErr error
+		for _, ip := range ips {
+			// replace, not add: idempotent across country switches, so a
+			// failure here is a real one.
+			if _, err := runCmd("ip", "route", "replace", ip+"/32", "via", gateway); err != nil {
+				routeErr = err
+				break
 			}
 		}
+		if routeErr != nil {
+			out.Errors = append(out.Errors, host+": "+routeErr.Error())
+			continue
+		}
+		pinnedHosts[host] = ips
+		for _, ip := range ips {
+			bypassIPs[ip] = true
+		}
+		out.Hosts = append(out.Hosts, routedHost{Hostname: host, IPs: ips})
 	}
 
-	if len(newEntries) > 0 {
-		sep := ""
-		if existingStr != "" && !strings.HasSuffix(existingStr, "\n") {
-			sep = "\n"
-		}
-		out := existingStr + sep + strings.Join(newEntries, "\n") + "\n"
-		_ = os.WriteFile("/etc/hosts", []byte(out), 0o644)
+	if err := writeHostsEntries(out.Hosts); err != nil {
+		out.Errors = append(out.Errors, "/etc/hosts: "+err.Error())
 	}
 
 	// Once the kill switch is live, newly routed bypass IPs must also be
@@ -448,7 +561,162 @@ func doAddRoutes(r request) response {
 		}
 	}
 
-	return response{OK: true}
+	data, _ := json.Marshal(out)
+	return response{OK: true, Data: data}
+}
+
+// writeHostsEntries appends unique `<ip> <hostname>` lines to /etc/hosts so
+// the app resolves each bypass host to the addresses that were routed (after
+// BRINGUP the resolver is Mullvad's, whose answer may differ). IPv4 literals
+// in the allowlist need no entry.
+func writeHostsEntries(hosts []routedHost) error {
+	existing, _ := os.ReadFile("/etc/hosts")
+	existingStr := string(existing)
+
+	var newEntries []string
+	for _, h := range hosts {
+		if _, err := netip.ParseAddr(h.Hostname); err == nil || !dnsNameRe.MatchString(h.Hostname) {
+			continue
+		}
+		for _, ip := range h.IPs {
+			entry := ip + " " + h.Hostname
+			lineRe := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(entry) + `\s*$`)
+			if !lineRe.MatchString(existingStr) && !contains(newEntries, entry) {
+				newEntries = append(newEntries, entry)
+			}
+		}
+	}
+	if len(newEntries) == 0 {
+		return nil
+	}
+	sep := ""
+	if existingStr != "" && !strings.HasSuffix(existingStr, "\n") {
+		sep = "\n"
+	}
+	out := existingStr + sep + strings.Join(newEntries, "\n") + "\n"
+	return os.WriteFile("/etc/hosts", []byte(out), 0o644)
+}
+
+// parseBypassAllowlist turns the -bypass-hosts value into the fixed
+// allowlist. Entries are normalised the way PPVDA's config does
+// (src/config.ts:parseHostList — trimmed, lower-cased); anything that is
+// neither a DNS name nor a public IPv4 literal is logged and dropped, so a
+// typo in VPN_BYPASS_HOSTS costs that one bypass rather than the VPN.
+func parseBypassAllowlist(v string) (map[string]bool, error) {
+	allow := map[string]bool{}
+	for _, raw := range strings.Split(v, ",") {
+		h := strings.ToLower(strings.TrimSpace(raw))
+		if h == "" {
+			continue
+		}
+		if addr, err := netip.ParseAddr(h); err == nil {
+			if !isPublicUnicastV4(addr) {
+				log.Printf("warn: -bypass-hosts: ignoring %q (not a public unicast IPv4 address)", h)
+				continue
+			}
+		} else if len(h) > 253 || !dnsNameRe.MatchString(h) {
+			log.Printf("warn: -bypass-hosts: ignoring %q (not a valid hostname)", h)
+			continue
+		}
+		allow[h] = true
+	}
+	if len(allow) > maxBypassHosts {
+		return nil, fmt.Errorf("more than %d hosts", maxBypassHosts)
+	}
+	return allow, nil
+}
+
+// resolveBypassHost returns the IPv4 addresses to route for an allowlisted
+// host. Every address must be public unicast: a bypass exists to reach a
+// public service (Mullvad's API, a remote Darkreel), and an answer
+// containing private, loopback, CGNAT or reserved space is refused outright
+// rather than filtered.
+func resolveBypassHost(host string) ([]string, error) {
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if !isPublicUnicastV4(addr) {
+			return nil, errors.New("not a public unicast IPv4 address")
+		}
+		return []string{addr.String()}, nil
+	}
+	res, err := bypassResolver()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
+	defer cancel()
+	addrs, err := res.LookupNetIP(ctx, "ip4", host)
+	if err != nil {
+		return nil, err
+	}
+	var ips []string
+	for _, a := range addrs {
+		a = a.Unmap()
+		if !isPublicUnicastV4(a) {
+			return nil, fmt.Errorf("resolved to non-public address %s", a)
+		}
+		if s := a.String(); !contains(ips, s) && len(ips) < maxBypassIPsPerHost {
+			ips = append(ips, s)
+		}
+	}
+	if len(ips) == 0 {
+		return nil, errors.New("no IPv4 addresses")
+	}
+	return ips, nil
+}
+
+// bypassResolver picks the DNS path for resolving a bypass host:
+//
+//   - before the first BRINGUP there is no kill switch, and the resolver is
+//     whatever Docker configured (its embedded 127.0.0.11, or the host's
+//     resolvers on the default bridge);
+//   - while the tunnel is up, Mullvad's resolver over wg0. It is dialled
+//     explicitly because Go re-reads resolv.conf at most every 5 s and could
+//     still be using Docker's resolver, which the kill switch rejects;
+//   - with the kill switch installed and the tunnel down, nothing can
+//     resolve, so only already-pinned hosts can be (re)routed.
+func bypassResolver() (*net.Resolver, error) {
+	switch {
+	case tunnelUp:
+		server := net.JoinHostPort(mullvadDNS, "53")
+		return &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, network, server)
+			},
+		}, nil
+	case relayEndpoint == "":
+		return net.DefaultResolver, nil
+	default:
+		return nil, errors.New("tunnel is down and the kill switch blocks DNS; resolve bypass hosts before the first BRINGUP or while the tunnel is up")
+	}
+}
+
+// Special-purpose IPv4 ranges netip's predicates don't cover.
+var nonPublicV4 = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"), // CGNAT
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"), // incl. 255.255.255.255
+}
+
+// isPublicUnicastV4 reports whether a is a globally routable unicast IPv4
+// address: not private, loopback, link-local, multicast, CGNAT, reserved or
+// documentation space.
+func isPublicUnicastV4(a netip.Addr) bool {
+	if !a.Is4() || !a.IsGlobalUnicast() || a.IsPrivate() {
+		return false
+	}
+	for _, p := range nonPublicV4 {
+		if p.Contains(a) {
+			return false
+		}
+	}
+	return true
 }
 
 // doGateway runs `ip route show default` and returns the first "default

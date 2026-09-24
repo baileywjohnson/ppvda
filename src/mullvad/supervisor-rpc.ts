@@ -31,10 +31,23 @@ export interface TeardownRequest {
   configDir: string;
 }
 
+// ADD_ROUTES names hosts only. The supervisor accepts just the hostnames
+// pinned by the entrypoint (-bypass-hosts), resolves them itself and
+// replies with the addresses it routed.
 export interface AddRoutesRequest {
   op: 'ADD_ROUTES';
-  gateway: string;
-  hosts: Array<{ hostname: string; ips: string[] }>;
+  hostnames: string[];
+}
+
+export interface RoutedHost {
+  hostname: string;
+  ips: string[];
+}
+
+export interface AddRoutesResult {
+  hosts: RoutedHost[];
+  // Per-host refusals/failures (not allowlisted, unresolvable, …).
+  errors: string[];
 }
 
 export interface GatewayRequest {
@@ -126,11 +139,12 @@ export async function rpcTeardown(configDir: string): Promise<void> {
   await call({ op: 'TEARDOWN', configDir });
 }
 
-export async function rpcAddRoutes(
-  gateway: string,
-  hosts: Array<{ hostname: string; ips: string[] }>,
-): Promise<void> {
-  await call({ op: 'ADD_ROUTES', gateway, hosts });
+export async function rpcAddRoutes(hostnames: string[]): Promise<AddRoutesResult> {
+  const data = await call({ op: 'ADD_ROUTES', hostnames }) as Partial<AddRoutesResult> | null;
+  return {
+    hosts: Array.isArray(data?.hosts) ? data.hosts : [],
+    errors: Array.isArray(data?.errors) ? data.errors : [],
+  };
 }
 
 export async function rpcGateway(): Promise<string | null> {
