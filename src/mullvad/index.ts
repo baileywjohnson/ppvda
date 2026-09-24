@@ -8,6 +8,7 @@ import {
   addRouteExceptions,
 } from './wireguard.js';
 import type { MullvadConfig, DeviceInfo } from './types.js';
+import { setVpnBypassIPs } from '../utils/url.js';
 
 interface Logger {
   info(obj: Record<string, unknown>, msg?: string): void;
@@ -101,6 +102,17 @@ export async function setupMullvad(
     await addRouteExceptions(resolvedBypasses, gateway);
     logger.info('VPN bypass routes added');
   }
+  registerBypasses(resolvedBypasses);
+}
+
+/**
+ * Bypass IPs are routed around the tunnel for *every* connection, not just
+ * the Mullvad API / Darkreel client that needs them. Extraction egress must
+ * never target them: a page on a CDN edge IP shared with the Darkreel host
+ * would otherwise be fetched outside the tunnel, exposing the real IP.
+ */
+function registerBypasses(bypasses: Array<{ ips: string[] }>): void {
+  setVpnBypassIPs(bypasses.flatMap((b) => b.ips));
 }
 
 /**
@@ -149,24 +161,27 @@ export async function switchMullvadCountry(
   switching = true;
 
   try {
-    // Tear down existing tunnel
-    await stopTunnel(activeConfig.configDir);
-    logger.info('Tunnel stopped for country switch');
-
-    // Capture gateway before new tunnel
-    const gateway = await getDefaultGateway();
-
-    // Resolve bypasses (always include api.mullvad.net)
+    // Do everything that needs the network BEFORE tearing the tunnel down:
+    // resolve bypasses (via Mullvad DNS, through the tunnel), fetch the
+    // relay list and validate the location. Previously this happened after
+    // teardown, and a bad location or API failure left no tunnel at all.
     const allSwitchBypasses = ['api.mullvad.net', ...(bypassHosts ?? [])];
     const resolvedBypasses: Array<{ hostname: string; ips: string[] }> = [];
     for (const host of allSwitchBypasses) {
       const ips = await resolveBypassHost(host);
       if (ips.length > 0) resolvedBypasses.push({ hostname: host, ips });
     }
-
-    // Find new relay
     const relays = await getRelayList();
     const { country, city, server } = findRelay(relays, location);
+
+    // The supervisor returns the gateway it captured at boot, so this works
+    // even while the tunnel is up.
+    const gateway = await getDefaultGateway();
+
+    // Tear down existing tunnel. The supervisor's kill switch keeps all
+    // non-tunnel egress blocked until the new tunnel is up.
+    await stopTunnel(activeConfig.configDir);
+    logger.info('Tunnel stopped for country switch');
 
     // Start new tunnel
     await startTunnel(activeConfig.configDir, activeDevice, server, gateway);
@@ -180,6 +195,7 @@ export async function switchMullvadCountry(
     if (gateway && resolvedBypasses.length > 0) {
       await addRouteExceptions(resolvedBypasses, gateway);
     }
+    registerBypasses(resolvedBypasses);
 
     return { country: country.name, city: city.name };
   } finally {

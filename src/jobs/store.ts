@@ -66,9 +66,27 @@ export class JobStore {
     return jobs.map(stripInternal);
   }
 
+  /** True while the job exists and has not reached a terminal state. */
+  isActive(id: string): boolean {
+    const job = this.jobs.get(id);
+    return !!job && !isTerminal(job);
+  }
+
+  /** Number of queued or running jobs owned by userId. */
+  activeCount(userId: string): number {
+    let n = 0;
+    for (const job of this.jobs.values()) {
+      if (job.userId === userId && !isTerminal(job)) n++;
+    }
+    return n;
+  }
+
   update(id: string, patch: Partial<Job>): Job | undefined {
     const job = this.jobs.get(id);
     if (!job) return undefined;
+    // Terminal states are final. Without this, a job the stale sweep had
+    // already failed could be revived by the pipeline still working on it.
+    if (isTerminal(job)) return job;
     Object.assign(job, patch, { updatedAt: coarseNow() });
     // Clear sensitive metadata from terminal jobs to minimize retained info
     if (job.status === 'done' || job.status === 'failed') {
@@ -117,6 +135,10 @@ export class JobStore {
       this.jobs.delete(id);
     }
   }
+}
+
+function isTerminal(job: Job): boolean {
+  return job.status === 'done' || job.status === 'failed';
 }
 
 function stripInternal(job: Job): JobResponse {

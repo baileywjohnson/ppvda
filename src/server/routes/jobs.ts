@@ -1,6 +1,6 @@
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import type { JobStore } from '../../jobs/store.js';
-import type { Pipeline } from '../../jobs/pipeline.js';
+import { TooManyJobsError, type Pipeline } from '../../jobs/pipeline.js';
 import { createJobRequestSchema, jobResponseSchema, jobListResponseSchema } from '../schemas/jobs.js';
 
 interface JobsRouteOpts {
@@ -24,7 +24,16 @@ export async function jobRoutes(app: FastifyInstance, opts: JobsRouteOpts) {
     },
     async (request, reply) => {
       const userId = (request as any).user.sub;
-      const jobId = await pipeline.submit(userId, request.body);
+      let jobId: string;
+      try {
+        jobId = await pipeline.submit(userId, request.body);
+      } catch (err) {
+        if (err instanceof TooManyJobsError) {
+          reply.status(429).send({ success: false, error: err.message });
+          return;
+        }
+        throw err;
+      }
       reply.status(202).send({ success: true, data: { id: jobId } });
     },
   );

@@ -7,10 +7,9 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { pipeline } from 'node:stream/promises';
 import { runFfmpeg } from '../../downloader/ffmpeg.js';
 import { streamDownloadRequestSchema } from '../schemas/stream-download.js';
-import { generateId } from '../../utils/id.js';
-import { ensureDir, secureUnlink } from '../../utils/fs.js';
+import { makeJobDir, secureRemoveDir } from '../../utils/fs.js';
 import type { ProxyConfig } from '../../proxy/types.js';
-import { isPrivateUrl, pinnedLookup, safeResolveHost } from '../../utils/url.js';
+import { isBlockedHostLiteral, isPrivateUrl, pinnedLookup, safeResolveHost } from '../../utils/url.js';
 import { isVpnSwitching } from '../../mullvad/index.js';
 import { isDirectMediaUrl } from '../../extractor/patterns.js';
 import { resolveProxy, type VpnPermissionStore } from '../vpn-permissions.js';
@@ -82,7 +81,7 @@ export async function streamDownloadRoutes(
         return;
       }
 
-      if (await isPrivateUrl(videoUrl)) {
+      if (await isPrivateUrl(videoUrl, { resolve: !proxy })) {
         reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
         return;
       }
@@ -135,6 +134,9 @@ async function handleImageDownload(
       return;
     }
     lookup = pinnedLookup(resolved);
+  } else if (isBlockedHostLiteral(parsed.hostname)) {
+    reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
+    return;
   }
   const mod = parsed.protocol === 'https:' ? https : http;
 
@@ -208,12 +210,14 @@ async function handleVideoDownload(
 ) {
   const safeName = sanitizeFilename(filename ?? 'video') + '.mp4';
 
-  const tempDir = join(opts.downloadDir, '..', 'tmp');
-  await ensureDir(tempDir);
-  const tempPath = join(tempDir, `stream-${generateId()}.mp4`);
-
   await ffmpegRouteSem.acquire();
+  // Stage inside DOWNLOAD_DIR (the tmpfs-backed location SECURITY.md
+  // recommends), in a private per-request directory. This used to be
+  // DOWNLOAD_DIR/../tmp, which sits outside that tmpfs.
+  let workDir: string | undefined;
   try {
+    workDir = await makeJobDir(opts.downloadDir);
+    const tempPath = join(workDir, 'stream.mp4');
     await runFfmpeg({
       inputUrl: videoUrl,
       outputPath: tempPath,
@@ -232,21 +236,23 @@ async function handleVideoDownload(
       'Cache-Control': 'no-store',
     });
 
-    let aborted = false;
-    request.raw.on('close', () => { aborted = true; });
-
     try {
       await pipeline(createReadStream(tempPath), reply.raw);
     } catch {
       // Connection dropped mid-stream
     } finally {
       reply.raw.end();
-      await secureUnlink(tempPath);
     }
   } catch {
-    await secureUnlink(tempPath);
-    reply.status(502).send({ success: false, error: 'Failed to download video' });
+    // After hijack() Fastify no longer owns the response; only send an
+    // error if headers haven't gone out yet.
+    if (!reply.raw.headersSent) {
+      reply.status(502).send({ success: false, error: 'Failed to download video' });
+    } else {
+      reply.raw.destroy();
+    }
   } finally {
+    if (workDir) await secureRemoveDir(workDir);
     ffmpegRouteSem.release();
   }
 }

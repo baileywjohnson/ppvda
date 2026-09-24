@@ -11,6 +11,8 @@ export interface DownloadOptions {
 
 export interface DownloadResult {
   id: string;
+  /** Private per-download directory containing filePath; remove with secureRemoveDir. */
+  workDir: string;
   filePath: string;
   fileSize: number;
   durationSec?: number;

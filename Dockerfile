@@ -69,12 +69,19 @@ COPY build.sh ./
 RUN bash build.sh && rm build.sh
 COPY package.json ./
 
-# Create non-root user for the app process. The wg-supervisor runs as root
-# and listens on /run/ppvda/wg.sock; we pre-create the directory so the
-# socket can be chowned to ppvda at startup.
+# Create non-root user for the app process. Only the directories Node writes
+# at runtime are ppvda-owned; the app code (dist/, node_modules/, public/)
+# stays root-owned so a compromised Node or Chromium process can't persist
+# by rewriting it.
+#
+# The wg-supervisor runs as root and listens on /run/ppvda/wg.sock. That
+# directory is root:ppvda 0750 — ppvda can reach the socket but can't
+# create, remove or replace entries in it. The supervisor keeps the
+# WireGuard config (private key) in its own root-only /run/wg-supervisor.
 RUN groupadd -r ppvda && useradd -r -g ppvda -m ppvda \
-    && mkdir -p /app/downloads /app/tmp /app/mullvad /app/data /run/ppvda \
-    && chown -R ppvda:ppvda /app /run/ppvda
+    && mkdir -p /app/downloads /app/tmp /app/data /run/ppvda \
+    && chown ppvda:ppvda /app/downloads /app/tmp /app/data \
+    && chown root:ppvda /run/ppvda && chmod 0750 /run/ppvda
 
 # Entrypoint drops to the `ppvda` user in both Mullvad and non-Mullvad
 # deployments. When Mullvad IS configured, the container still needs
@@ -87,7 +94,6 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV NODE_ENV=production
 ENV DOWNLOAD_DIR=/app/downloads
 ENV TEMP_DIR=/app/tmp
-ENV MULLVAD_CONFIG_DIR=/app/mullvad
 
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

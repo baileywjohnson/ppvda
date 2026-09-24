@@ -51,7 +51,7 @@ const (
 	maxFrameBytes    = 64 * 1024
 	subprocessTimeout = 30 * time.Second
 	defaultSocketPath = "/run/ppvda/wg.sock"
-	defaultConfigDir  = "/app/mullvad"
+	defaultConfigDir  = "/run/wg-supervisor"
 	wgInterface       = "wg0"
 )
 
@@ -68,6 +68,21 @@ const (
 // override it — i.e. the manual Docker path in the README — failed BRINGUP
 // with "configDir must be an absolute path".
 var configDir = defaultConfigDir
+
+// Kill-switch state. All mutation happens inside dispatch, which runs under
+// opMu, so no further locking is needed.
+var (
+	// bootGateway is the container's original default gateway, captured
+	// before any tunnel exists. Once the tunnel is up (or torn down to an
+	// unreachable default) `ip route show default` no longer reveals it.
+	bootGateway string
+	// relayEndpoint is the current relay's "ip:port"; its UDP handshake
+	// traffic is the only thing allowed out of the real interface besides
+	// the bypass IPs.
+	relayEndpoint string
+	// bypassIPs accumulates every IP ADD_ROUTES has routed around the tunnel.
+	bypassIPs = map[string]bool{}
+)
 
 type request struct {
 	Op string `json:"op"`
@@ -132,6 +147,9 @@ func main() {
 		log.Fatalf("-config-dir %q must be an absolute path", *configDirFlag)
 	}
 	configDir = filepath.Clean(*configDirFlag)
+	if err := secureConfigDir(configDir); err != nil {
+		log.Fatalf("config dir: %v", err)
+	}
 
 	if *allowUIDStr == "" {
 		log.Fatal("-uid is required (the ppvda user's uid)")
@@ -139,6 +157,12 @@ func main() {
 	allowUID, err := strconv.Atoi(*allowUIDStr)
 	if err != nil || allowUID < 0 {
 		log.Fatalf("-uid %q is not a valid uid", *allowUIDStr)
+	}
+
+	if gw, err := liveGateway(); err == nil && gw != "" {
+		bootGateway = gw
+	} else {
+		log.Printf("warn: could not determine default gateway at startup")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(*socketPath), 0o755); err != nil {
@@ -307,7 +331,10 @@ func doBringup(r request) response {
 		"Table = off\n" +
 		"PostUp = ip route add " + r.RelayIP + "/32 via " + r.Gateway +
 		" && ip route replace default dev " + wgInterface + "\n" +
-		"PreDown = ip route replace default via " + r.Gateway +
+		// On teardown the default route becomes unreachable rather than
+		// reverting to the real gateway: with the tunnel down, nothing
+		// should have a route out except the explicit /32 bypasses.
+		"PreDown = ip route replace unreachable default" +
 		" ; ip route del " + r.RelayIP + "/32 via " + r.Gateway + "\n" +
 		"\n" +
 		"[Peer]\n" +
@@ -315,11 +342,21 @@ func doBringup(r request) response {
 		"AllowedIPs = " + r.PeerAllowedIPs + "\n" +
 		"Endpoint = " + r.PeerEndpoint + "\n"
 
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		return response{Error: "mkdir configDir: " + err.Error()}
+	// The egress policy goes in before the tunnel comes up and is never
+	// removed: from the first BRINGUP on, nothing but the tunnel, the relay
+	// handshake and the bypass IPs can leave this network namespace —
+	// including across teardown, country switches and crashes of either
+	// process. If it can't be installed, refuse to bring the tunnel up.
+	relayEndpoint = r.PeerEndpoint
+	if err := applyKillSwitch(); err != nil {
+		return response{Error: "kill switch: " + err.Error()}
+	}
+
+	if err := secureConfigDir(configDir); err != nil {
+		return response{Error: "config dir: " + err.Error()}
 	}
 	configPath := filepath.Join(configDir, wgInterface+".conf")
-	if err := os.WriteFile(configPath, []byte(cfg), 0o600); err != nil {
+	if err := writeFileNoFollow(configPath, []byte(cfg)); err != nil {
 		return response{Error: "write config: " + err.Error()}
 	}
 
@@ -383,6 +420,7 @@ func doAddRoutes(r request) response {
 			}
 			// Best-effort route add — may already exist.
 			_, _ = runCmd("ip", "route", "add", ip+"/32", "via", r.Gateway)
+			bypassIPs[ip] = true
 
 			entry := ip + " " + h.Hostname
 			lineRe := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(entry) + `\s*$`)
@@ -401,6 +439,15 @@ func doAddRoutes(r request) response {
 		_ = os.WriteFile("/etc/hosts", []byte(out), 0o644)
 	}
 
+	// Once the kill switch is live, newly routed bypass IPs must also be
+	// allowed through it. Before the first BRINGUP it isn't installed yet;
+	// BRINGUP picks the accumulated set up then.
+	if relayEndpoint != "" {
+		if err := applyKillSwitch(); err != nil {
+			return response{Error: "kill switch: " + err.Error()}
+		}
+	}
+
 	return response{OK: true}
 }
 
@@ -412,25 +459,110 @@ func doAddRoutes(r request) response {
 // other privileged ops; technically `ip route show default` doesn't need
 // privileges, so this could be done client-side if we ever trim surface.
 func doGateway() response {
-	stdout, err := runCmd("ip", "route", "show", "default")
-	if err != nil {
-		return response{Error: err.Error()}
-	}
-	var gw string
-	for _, line := range strings.Split(stdout, "\n") {
-		fields := strings.Fields(line)
-		for i, f := range fields {
-			if f == "via" && i+1 < len(fields) {
-				gw = fields[i+1]
-				break
-			}
+	gw := bootGateway
+	if gw == "" {
+		live, err := liveGateway()
+		if err != nil {
+			return response{Error: err.Error()}
 		}
-		if gw != "" {
-			break
-		}
+		gw = live
 	}
 	data, _ := json.Marshal(map[string]string{"gateway": gw})
 	return response{OK: true, Data: data}
+}
+
+// liveGateway returns the "via" address of the current default route.
+func liveGateway() (string, error) {
+	stdout, err := runCmd("ip", "route", "show", "default")
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f == "via" && i+1 < len(fields) && ipv4Re.MatchString(fields[i+1]) {
+				return fields[i+1], nil
+			}
+		}
+	}
+	return "", nil
+}
+
+const (
+	ksChain  = "PPVDA_KILLSWITCH"
+	ksChain6 = "PPVDA_KILLSWITCH6"
+	// Docker's embedded resolver. It forwards queries through dockerd on
+	// the host, i.e. to the host's resolver outside the tunnel.
+	dockerDNS = "127.0.0.11"
+)
+
+// applyKillSwitch (re)builds the egress policy for this network namespace.
+// Each chain is replaced in a single iptables-restore transaction, so there
+// is no moment where it is flushed but not yet repopulated. Allowed out:
+//
+//   - loopback (except Docker's embedded DNS, which would leak queries)
+//   - anything over the tunnel interface
+//   - replies to connections that came IN (the published web port)
+//   - UDP to the current relay endpoint (the WireGuard handshake itself)
+//   - the bypass IPs from ADD_ROUTES (Mullvad API, Darkreel)
+//
+// Everything else is rejected, whatever the routing table says.
+func applyKillSwitch() error {
+	var b strings.Builder
+	b.WriteString("*filter\n:" + ksChain + " - [0:0]\n-F " + ksChain + "\n")
+	b.WriteString("-A " + ksChain + " -o lo -d " + dockerDNS + " -j REJECT\n")
+	b.WriteString("-A " + ksChain + " -o lo -j RETURN\n")
+	b.WriteString("-A " + ksChain + " -o " + wgInterface + " -j RETURN\n")
+	b.WriteString("-A " + ksChain + " -m conntrack --ctdir REPLY -j RETURN\n")
+	if relayEndpoint != "" {
+		host, port, err := net.SplitHostPort(relayEndpoint)
+		if err != nil || !ipv4Re.MatchString(host) {
+			return fmt.Errorf("invalid relay endpoint %q", relayEndpoint)
+		}
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return fmt.Errorf("invalid relay port %q", port)
+		}
+		b.WriteString("-A " + ksChain + " -d " + host + "/32 -p udp --dport " + port + " -j RETURN\n")
+	}
+	for ip := range bypassIPs {
+		b.WriteString("-A " + ksChain + " -d " + ip + "/32 -j RETURN\n")
+	}
+	b.WriteString("-A " + ksChain + " -j REJECT\n")
+	b.WriteString("COMMIT\n")
+	if _, err := runCmdStdin(b.String(), "iptables-restore", "-w", "--noflush"); err != nil {
+		return err
+	}
+	if err := ensureJump("iptables", ksChain); err != nil {
+		return err
+	}
+
+	// The tunnel is IPv4-only, so nothing but loopback and replies may
+	// leave over IPv6. If ip6tables is unavailable that's only acceptable
+	// when IPv6 is disabled outright.
+	rules6 := "*filter\n:" + ksChain6 + " - [0:0]\n-F " + ksChain6 + "\n" +
+		"-A " + ksChain6 + " -o lo -j RETURN\n" +
+		"-A " + ksChain6 + " -m conntrack --ctdir REPLY -j RETURN\n" +
+		"-A " + ksChain6 + " -j REJECT\n" +
+		"COMMIT\n"
+	_, err6 := runCmdStdin(rules6, "ip6tables-restore", "-w", "--noflush")
+	if err6 == nil {
+		err6 = ensureJump("ip6tables", ksChain6)
+	}
+	if err6 != nil {
+		if disabled, _ := os.ReadFile("/proc/sys/net/ipv6/conf/all/disable_ipv6"); strings.TrimSpace(string(disabled)) != "1" {
+			return fmt.Errorf("ip6tables policy failed and IPv6 is enabled: %v", err6)
+		}
+	}
+	return nil
+}
+
+// ensureJump makes chain the first rule of OUTPUT, adding it only once.
+func ensureJump(bin, chain string) error {
+	if _, err := runCmd(bin, "-w", "-C", "OUTPUT", "-j", chain); err == nil {
+		return nil
+	}
+	_, err := runCmd(bin, "-w", "-I", "OUTPUT", "1", "-j", chain)
+	return err
 }
 
 // runCmd is the single place subprocesses are started from. Fixed argv,
@@ -459,20 +591,98 @@ func runCmd(name string, args ...string) (string, error) {
 	return string(out), nil
 }
 
+// runCmdStdin is runCmd with the given input on stdin (for *-restore).
+func runCmdStdin(input, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+	cmd.Stdin = strings.NewReader(input)
+
+	timer := time.AfterFunc(subprocessTimeout, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	defer timer.Stop()
+
+	out, err := cmd.CombinedOutput()
+	if len(out) > 16*1024 {
+		out = out[:16*1024]
+	}
+	if err != nil {
+		return string(out), fmt.Errorf("%s %s: %v: %s", name, strings.Join(args, " "), err, string(out))
+	}
+	return string(out), nil
+}
+
+// secureConfigDir creates dir if needed and verifies it is a real directory
+// (not a symlink) owned by root with mode 0700. The supervisor writes and
+// shreds files in it as root, so if any other user could create entries in
+// it — as they could when it was the ppvda-owned /app/mullvad — a planted
+// symlink would turn those writes into arbitrary root file overwrites.
+func secureConfigDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != 0 {
+		return fmt.Errorf("%s must be owned by root", dir)
+	}
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeFileNoFollow replaces path with a new 0600 file without following a
+// symlink or reusing an existing inode: any existing entry is removed, then
+// the file is created with O_EXCL|O_NOFOLLOW.
+func writeFileNoFollow(path string, data []byte) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 // secureUnlink overwrites a file with random bytes and fsyncs before
 // unlinking it. Best-effort "don't leave the WG private key sitting in
 // recoverable slack" — same caveats as PPVDA's own secureUnlink
-// (CoW filesystems and SSDs can defeat the overwrite).
+// (CoW filesystems and SSDs can defeat the overwrite). Symlinks and
+// non-regular files are only unlinked, never opened.
 func secureUnlink(path string) {
-	stat, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if !info.Mode().IsRegular() {
+		_ = os.Remove(path)
+		return
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return
 	}
 	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil || !os.SameFile(info, stat) {
+		return
+	}
 	buf := make([]byte, 4096)
 	if _, err := rand.Read(buf); err != nil {
 		// Fall back to the zero buffer — still destroys the key material,

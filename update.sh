@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 #
-# PPVDA auto-updater — checks for new commits on main and rebuilds.
+# PPVDA auto-updater — deploys the newest *signed* release tag.
 #
-# Fetches the latest commit from GitHub. If it's newer than what's
-# running, pulls and rebuilds the Docker container.
+# Only tags (vMAJOR.MINOR.PATCH) whose SSH signature verifies against
+# /etc/ppvda/allowed_signers are deployed, and only as a fast-forward of
+# what is running. This runs as root and rebuilds the container, so an
+# unverified update would be root on the host: previously any push to main
+# (or a compromised GitHub account) was deployed within 24 hours.
+#
+# One-time setup on the server (the key is the maintainer's SSH signing key):
+#   echo "release-signer $(cat id_ed25519.pub)" > /etc/ppvda/allowed_signers
+# Releasing:
+#   git tag -s v1.2.3 -m v1.2.3   (with git config gpg.format ssh)
+#   git push origin v1.2.3
 #
 # Usage:
 #   sudo ./update.sh              # run once
@@ -13,6 +22,7 @@
 set -euo pipefail
 
 REPO_DIR="/opt/ppvda"
+ALLOWED_SIGNERS="/etc/ppvda/allowed_signers"
 CRON_FILE="/etc/cron.d/ppvda-update"
 LOG_FILE="/var/log/ppvda-update.log"
 
@@ -58,23 +68,41 @@ fi
 
 cd "$REPO_DIR"
 
-# --- Get current and latest commits ---
-CURRENT=$(git rev-parse HEAD)
-git fetch --quiet origin main
+if [ ! -f "$ALLOWED_SIGNERS" ] || [ -L "$ALLOWED_SIGNERS" ]; then
+  error "No signing key at $ALLOWED_SIGNERS — refusing to deploy unverified code (see the header of this script)"
+fi
 
-LATEST=$(git rev-parse origin/main)
+# --- Find the newest release tag ---
+CURRENT=$(git rev-parse HEAD)
+# --force: a tag that was moved upstream must not be silently kept stale
+git fetch --quiet --force --tags origin
+TAG=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+[ -n "$TAG" ] || error "No release tags found"
+
+# --- Verify its signature against the pinned signer ---
+if ! git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$ALLOWED_SIGNERS" \
+     verify-tag "$TAG" >/dev/null 2>&1; then
+  error "Tag $TAG is not signed by an allowed signer — refusing to deploy"
+fi
+LATEST=$(git rev-parse "${TAG}^{commit}")
 
 if [ "$CURRENT" = "$LATEST" ]; then
-  info "Already on latest commit (${CURRENT:0:8})"
+  info "Already on latest release $TAG (${CURRENT:0:8})"
   exit 0
 fi
 
-info "Update available: ${CURRENT:0:8} -> ${LATEST:0:8}"
+# --- Only move forward ---
+# Every old tag stays validly signed, so without this a re-pointed tag list
+# could roll the server back to a vulnerable release.
+if ! git merge-base --is-ancestor "$CURRENT" "$LATEST"; then
+  error "$TAG (${LATEST:0:8}) does not descend from the running ${CURRENT:0:8} — refusing (rollback or rewritten history)"
+fi
 
-# --- Pull and rebuild ---
-info "Pulling latest changes..."
-git checkout --quiet main
-git pull --quiet origin main
+info "Update available: ${CURRENT:0:8} -> $TAG (${LATEST:0:8})"
+
+# --- Check out the verified commit and rebuild ---
+info "Checking out $TAG..."
+git checkout --quiet --detach "$LATEST"
 
 info "Rebuilding container (this may take a few minutes)..."
 docker compose up --build -d
@@ -89,7 +117,7 @@ for i in $(seq 1 30); do
 done
 
 if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
-  info "Updated to ${LATEST:0:8} successfully"
+  info "Updated to $TAG (${LATEST:0:8}) successfully"
 else
   warn "Container started but health check failed — check: docker compose logs -f"
 fi

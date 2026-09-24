@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { generateId } from '../utils/id.js';
-import { ensureDir, tempPath, moveFile, fileSize, secureUnlink } from '../utils/fs.js';
+import { tempPath, moveFile, fileSize, makeJobDir, secureRemoveDir } from '../utils/fs.js';
 import { DownloadError } from '../utils/errors.js';
 import { downloadDirect } from './direct.js';
 import { downloadHls } from './hls.js';
@@ -13,7 +13,6 @@ export type { DownloadOptions, DownloadResult } from './types.js';
 interface FullDownloadOptions extends DownloadOptions {
   proxy?: ProxyConfig;
   ffmpegPath?: string;
-  tempDir?: string;
 }
 
 /**
@@ -30,18 +29,20 @@ export async function downloadVideo(options: FullDownloadOptions): Promise<Downl
     maxBytes,
     proxy,
     ffmpegPath = 'ffmpeg',
-    tempDir,
   } = options;
-  const effectiveTempDir = tempDir ?? join(outputDir, '.tmp');
 
+  // Every file this download produces lives in its own 0700 directory.
+  // The final name is human-readable (it becomes the Darkreel filename) and
+  // is therefore NOT unique — HLS outputs are routinely `index`/`master` —
+  // so uniqueness must come from the directory. A shared outputDir let two
+  // concurrent jobs rename() onto the same path and upload or delete each
+  // other's plaintext.
+  const workDir = await makeJobDir(outputDir);
   const id = generateId();
   const ext = type === 'image' ? extFromUrl(url, '.jpg') : type === 'direct' ? extFromUrl(url) : '.mp4';
   const finalFilename = sanitizeFilename(filename ?? filenameFromUrl(url)) + ext;
-  const finalPath = join(outputDir, finalFilename);
-  const tmpPath = tempPath(effectiveTempDir, id, ext);
-
-  await ensureDir(outputDir);
-  await ensureDir(effectiveTempDir);
+  const finalPath = join(workDir, finalFilename);
+  const tmpPath = tempPath(workDir, id, ext);
 
   try {
     let durationSec: number | undefined;
@@ -90,6 +91,7 @@ export async function downloadVideo(options: FullDownloadOptions): Promise<Downl
 
     return {
       id,
+      workDir,
       filePath: finalPath,
       fileSize: size,
       durationSec,
@@ -97,8 +99,8 @@ export async function downloadVideo(options: FullDownloadOptions): Promise<Downl
       success: true,
     };
   } catch (err) {
-    // Securely clean up temp file on failure
-    await secureUnlink(tmpPath);
+    // Securely clean up everything the download wrote
+    await secureRemoveDir(workDir);
     throw err;
   }
 }
@@ -109,7 +111,7 @@ function extFromUrl(url: string, fallback = '.mp4'): string {
     const dot = pathname.lastIndexOf('.');
     if (dot !== -1) {
       const ext = pathname.substring(dot).toLowerCase();
-      if (ext.length <= 6) return ext;
+      if (/^\.[a-z0-9]{1,5}$/.test(ext)) return ext;
     }
   } catch {}
   return fallback;

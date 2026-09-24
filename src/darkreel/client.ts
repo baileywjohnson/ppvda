@@ -198,7 +198,6 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
   const fileKey = randomBytes(32);
   const thumbKey = randomBytes(32);
   const metadataKey = randomBytes(32);
-  const hashNonce = randomBytes(32); // server stores for dedup-resistance
 
   try {
     // Thumbnail. Generate off-disk (ffmpeg for media, placeholder for file).
@@ -269,7 +268,6 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
       file_key_sealed: fileKeySealed.toString('base64'),
       thumb_key_sealed: thumbKeySealed.toString('base64'),
       metadata_key_sealed: metadataKeySealed.toString('base64'),
-      hash_nonce: hashNonce.toString('base64'),
       metadata_enc: metadataCiphertext.toString('base64'),
       metadata_nonce: metadataNonce.toString('base64'),
     }));

@@ -5,7 +5,7 @@ import { pipeline } from 'node:stream/promises';
 import { DownloadError, TimeoutError } from '../utils/errors.js';
 import type { ProxyConfig } from '../proxy/types.js';
 import { getHttpAgent } from '../proxy/index.js';
-import { pinnedLookup, safeResolveHost } from '../utils/url.js';
+import { isBlockedHostLiteral, pinnedLookup, safeResolveHost } from '../utils/url.js';
 
 export interface DirectDownloadOptions {
   url: string;
@@ -96,6 +96,11 @@ async function downloadWithRedirects(
       );
     }
     pinnedLookupFn = pinnedLookup(resolved);
+  } else if (isBlockedHostLiteral(parsed.hostname)) {
+    // Behind a proxy the proxy resolves names (resolving here would leak
+    // the hostname to this host's resolver), so only literal checks apply —
+    // but they apply on every redirect hop.
+    throw new DownloadError(`Host ${parsed.hostname} is a private/internal address`, 'SSRF_BLOCKED');
   }
 
   return new Promise<void>((resolve, reject) => {

@@ -13,7 +13,21 @@ services:
     volumes:
       - ./downloads:/app/downloads
       - ./data:/app/data
-      - ./mullvad:/app/mullvad
+    security_opt:
+      # Docker's default seccomp profile plus permission to create user
+      # namespaces, which Chromium's sandbox needs (Playwright's published
+      # profile, utils/docker/seccomp_profile.json). Without it the browser
+      # that loads arbitrary pages can only run with --no-sandbox.
+      - seccomp=./chromium-seccomp.json
+      # Nothing in the container needs setuid escalation: the entrypoint
+      # starts as root and only ever drops privileges (gosu).
+      - no-new-privileges:true
+    sysctls:
+      # The WireGuard tunnel is IPv4-only. With IPv6 enabled on the Docker
+      # network, dual-stack targets would be reached over IPv6 outside it
+      # (the supervisor's ip6tables policy also rejects IPv6 egress).
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
     # Required for WireGuard tunnel (Mullvad)
     cap_add:
       - NET_ADMIN

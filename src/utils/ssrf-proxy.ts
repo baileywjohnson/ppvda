@@ -2,9 +2,11 @@ import http from 'node:http';
 import net from 'node:net';
 import type { Duplex } from 'node:stream';
 import { URL } from 'node:url';
-import { safeResolveHost } from './url.js';
+import { isBlockedHostLiteral, safeResolveHost } from './url.js';
+import { dialThroughProxy } from '../proxy/index.js';
+import type { ProxyConfig } from '../proxy/types.js';
 
-// Local SSRF-filtering forward proxy for ffmpeg / ffprobe. Every CONNECT
+// Local SSRF-filtering forward proxy for ffmpeg / ffprobe and Chromium. Every CONNECT
 // target and every HTTP absolute-URI request goes through safeResolveHost
 // before the proxy opens an upstream socket — so ffmpeg can't reach a
 // private IP even if the user-supplied URL redirects, even if the
@@ -19,6 +21,14 @@ import { safeResolveHost } from './url.js';
 // we don't know them until ffmpeg parses the manifest. Funnelling every
 // ffmpeg HTTP(S) egress through a single choke-point is the only way
 // to cover that surface.
+//
+// With an upstream proxy (PROXY_URL) configured, this proxy chains to it:
+// targets are validated by their literal host only (the upstream resolves
+// names — resolving here too would leak every hostname to this host's DNS
+// resolver), then tunnelled through the upstream. ffmpeg can't be pointed
+// at the upstream directly: it only honours http:// proxies, so a SOCKS or
+// https:// PROXY_URL used to be silently ignored and ffmpeg connected
+// straight out from the host's real IP.
 
 const IDLE_SOCKET_TIMEOUT_MS = 5 * 60 * 1000; // 5 min — generous for slow CDNs
 const CONNECT_UPSTREAM_TIMEOUT_MS = 15 * 1000;
@@ -27,6 +37,33 @@ export class SsrfProxy {
   private server: http.Server | null = null;
   private port: number | null = null;
   private activeSockets = new Set<Duplex>();
+
+  constructor(private readonly upstream?: ProxyConfig) {}
+
+  /**
+   * Validate host and open a TCP connection to host:port — pinned to the
+   * validated address when connecting directly, or tunnelled through the
+   * upstream proxy. Returns null if the target is blocked.
+   */
+  private async openUpstream(host: string, port: number): Promise<net.Socket | null> {
+    if (this.upstream) {
+      if (isBlockedHostLiteral(host)) return null;
+      const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+      return dialThroughProxy(this.upstream, bare, port);
+    }
+    const resolved = await safeResolveHost(host);
+    if (!resolved) return null;
+    const sock = net.createConnection({ host: resolved.address, port, family: resolved.family });
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        sock.destroy();
+        reject(new Error('connect timeout'));
+      }, CONNECT_UPSTREAM_TIMEOUT_MS);
+      sock.once('connect', () => { clearTimeout(timer); resolve(); });
+      sock.once('error', (err) => { clearTimeout(timer); reject(err); });
+    });
+    return sock;
+  }
 
   /**
    * Start the proxy on a random loopback port. Resolves with the bound
@@ -121,42 +158,32 @@ export class SsrfProxy {
       return;
     }
 
-    const resolved = await safeResolveHost(host);
-    if (!resolved) {
+    let upstream: net.Socket | null;
+    try {
+      upstream = await this.openUpstream(host, port);
+    } catch {
+      try { clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch { /* already closed */ }
+      return;
+    }
+    if (!upstream) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }
-
-    const upstream = net.createConnection({
-      host: resolved.address,
-      port,
-      family: resolved.family,
-    });
     this.activeSockets.add(upstream);
     upstream.on('close', () => this.activeSockets.delete(upstream));
 
-    // Cap how long we wait for the TCP handshake; ffmpeg itself has its
-    // own per-operation timeouts for data flow once the tunnel is up.
-    const connectTimer = setTimeout(() => {
-      upstream.destroy();
-      try { clientSocket.end('HTTP/1.1 504 Gateway Timeout\r\n\r\n'); } catch { /* already closed */ }
-    }, CONNECT_UPSTREAM_TIMEOUT_MS);
-
-    upstream.once('connect', () => {
-      clearTimeout(connectTimer);
-      upstream.setTimeout(IDLE_SOCKET_TIMEOUT_MS);
-      clientSocket.setTimeout(IDLE_SOCKET_TIMEOUT_MS);
-      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      if (head.length > 0) upstream.write(head);
-      upstream.pipe(clientSocket);
-      clientSocket.pipe(upstream);
-    });
+    upstream.setTimeout(IDLE_SOCKET_TIMEOUT_MS);
+    clientSocket.setTimeout(IDLE_SOCKET_TIMEOUT_MS);
+    clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+    if (head.length > 0) upstream.write(head);
+    upstream.pipe(clientSocket);
+    clientSocket.pipe(upstream);
 
     const closeBoth = () => {
       try { upstream.destroy(); } catch { /* already gone */ }
       try { clientSocket.destroy(); } catch { /* already gone */ }
     };
-    upstream.on('error', () => { clearTimeout(connectTimer); closeBoth(); });
+    upstream.on('error', closeBoth);
     upstream.on('timeout', closeBoth);
     clientSocket.on('error', closeBoth);
     clientSocket.on('timeout', closeBoth);
@@ -184,20 +211,31 @@ export class SsrfProxy {
       res.writeHead(400); res.end('proxy: use CONNECT for https'); return;
     }
 
-    const resolved = await safeResolveHost(parsed.hostname);
-    if (!resolved) {
+    const port = parsed.port ? parseInt(parsed.port, 10) : 80;
+    let socket: net.Socket | null;
+    try {
+      socket = await this.openUpstream(parsed.hostname, port);
+    } catch {
+      res.writeHead(502); res.end(); return;
+    }
+    if (!socket) {
       res.writeHead(403); res.end('proxy: target blocked'); return;
     }
+    const upstreamSocket = socket;
+    this.activeSockets.add(upstreamSocket);
+    upstreamSocket.on('close', () => this.activeSockets.delete(upstreamSocket));
 
     const upstreamReq = http.request({
-      host: resolved.address,
-      port: parsed.port ? parseInt(parsed.port, 10) : 80,
+      host: parsed.hostname,
+      port,
       path: (parsed.pathname || '/') + parsed.search,
       method: req.method,
       // Preserve the original Host header so the upstream's virtual hosting
       // still works even though we connect by IP.
       headers: { ...req.headers, host: parsed.host },
-      family: resolved.family,
+      // Use the socket we validated and opened; http.request must not
+      // resolve or connect on its own.
+      createConnection: () => upstreamSocket,
     }, (upstreamRes) => {
       res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
       upstreamRes.pipe(res);

@@ -1,4 +1,5 @@
 import { stat } from 'node:fs/promises';
+import { isVpnSwitching } from './index.js';
 
 // Application-level VPN kill-switch. The OS handles routing, but nothing
 // stops the app from issuing outbound requests if WireGuard drops mid-session.
@@ -151,6 +152,9 @@ export function stopVpnHealthCheck(): void {
  */
 export function isVpnHealthy(): boolean {
   if (!state) return true;
+  // Mid-switch the tunnel is (or is about to be) down, but the 5 s interface
+  // poll can still report the old state.
+  if (isVpnSwitching()) return false;
   const now = Date.now();
   const interfaceFresh = now - state.interfaceLastCheck < LOCAL_STALE_MS;
   const routingFresh = now - state.routingLastCheck < REMOTE_STALE_MS;

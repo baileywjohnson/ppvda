@@ -207,8 +207,10 @@ fi
 # Create the deploy script (the ONLY thing deploy can sudo).
 # Accepts a commit SHA as argument, verifies its Ed25519 signature
 # against the public key at /etc/ppvda/signing.pub, then checks out
-# that exact commit and rebuilds. Without a valid signature, the
-# deploy is rejected — even if GitHub Actions is compromised.
+# that exact commit and rebuilds. Without the key installed, or without a
+# valid signature, the deploy is rejected. The signing key must be kept
+# off GitHub — a key stored as an Actions secret is only as safe as every
+# action and token with access to it.
 cat > /usr/local/bin/ppvda-deploy << 'SCRIPT'
 #!/bin/bash
 set -euo pipefail
@@ -219,42 +221,50 @@ SIGNING_PUB="/etc/ppvda/signing.pub"
 HASH_FILE="/home/deploy/commit.hash"
 SIG_FILE="/home/deploy/commit.sig"
 
-if [ -z "$COMMIT_SHA" ]; then
-  echo "Usage: ppvda-deploy <commit-sha>" >&2
+if ! [[ "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Usage: ppvda-deploy <40-char commit sha>" >&2
   exit 1
 fi
 
-# Verify Ed25519 signature if signing key is installed
-if [ -f "$SIGNING_PUB" ]; then
-  if [ ! -f "$SIG_FILE" ] || [ ! -f "$HASH_FILE" ]; then
-    echo "ERROR: commit.hash and commit.sig must be in /home/deploy/" >&2
-    exit 1
-  fi
-
-  # Verify the signature matches the commit SHA
-  EXPECTED_SHA=$(cat "$HASH_FILE" | tr -d '[:space:]')
-  if [ "$EXPECTED_SHA" != "$COMMIT_SHA" ]; then
-    echo "ERROR: commit hash mismatch" >&2
-    exit 1
-  fi
-
-  openssl pkeyutl -verify -pubin \
-    -inkey "$SIGNING_PUB" \
-    -rawin -in "$HASH_FILE" -sigfile "$SIG_FILE" || {
-    echo "ERROR: signature verification failed — deploy rejected" >&2
-    exit 1
-  }
-  echo "Signature verified for commit $COMMIT_SHA"
-else
-  echo "WARNING: no signing key at $SIGNING_PUB — skipping signature verification" >&2
+# Fail closed: no key, no deploy.
+if [ ! -f "$SIGNING_PUB" ]; then
+  echo "ERROR: no signing key at $SIGNING_PUB — deploy rejected" >&2
+  exit 1
+fi
+if [ ! -f "$SIG_FILE" ] || [ ! -f "$HASH_FILE" ]; then
+  echo "ERROR: commit.hash and commit.sig must be in /home/deploy/" >&2
+  exit 1
 fi
 
-# Clean up signature files
+# Work on root-owned copies. /home/deploy is writable by the deploy user,
+# who could otherwise swap the files between the checks below.
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+cp --no-dereference -- "$HASH_FILE" "$WORK/commit.hash"
+cp --no-dereference -- "$SIG_FILE" "$WORK/commit.sig"
 rm -f "$HASH_FILE" "$SIG_FILE"
+[ -f "$WORK/commit.hash" ] && [ ! -L "$WORK/commit.hash" ] || { echo "ERROR: bad commit.hash" >&2; exit 1; }
 
-# Fetch and checkout the verified commit
+if [ "$(tr -d '[:space:]' < "$WORK/commit.hash")" != "$COMMIT_SHA" ]; then
+  echo "ERROR: commit hash mismatch" >&2
+  exit 1
+fi
+openssl pkeyutl -verify -pubin \
+  -inkey "$SIGNING_PUB" \
+  -rawin -in "$WORK/commit.hash" -sigfile "$WORK/commit.sig" || {
+  echo "ERROR: signature verification failed — deploy rejected" >&2
+  exit 1
+}
+echo "Signature verified for commit $COMMIT_SHA"
+
+# Fetch and checkout the verified commit — forward only. Every commit ever
+# signed stays valid, so this is what stops a rollback to an old one.
 cd "$REPO_DIR"
 git fetch --quiet origin
+if ! git merge-base --is-ancestor HEAD "$COMMIT_SHA"; then
+  echo "ERROR: $COMMIT_SHA does not descend from the deployed commit — refusing" >&2
+  exit 1
+fi
 git checkout --quiet "$COMMIT_SHA"
 docker compose up --build -d
 SCRIPT
@@ -308,7 +318,7 @@ fi
 cd "$REPO_DIR"
 
 # --- Create directories ---
-mkdir -p data downloads mullvad
+mkdir -p data downloads
 
 # --- Generate .env ---
 # The admin password goes to a separate file (deleted after first start)
@@ -372,7 +382,6 @@ if [ -n "$MULLVAD_ACCOUNT" ]; then
 # Mullvad VPN
 MULLVAD_ACCOUNT=${MULLVAD_ACCOUNT}
 MULLVAD_LOCATION=${MULLVAD_LOCATION}
-MULLVAD_CONFIG_DIR=/app/mullvad
 EOF
 
   # Add Darkreel URL as VPN bypass host (so uploads don't go through VPN)

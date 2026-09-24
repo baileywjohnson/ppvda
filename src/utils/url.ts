@@ -1,4 +1,5 @@
 import { lookup } from 'node:dns/promises';
+import { BlockList, isIP } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 
 /** IP address + address family from a validated hostname resolution. */
@@ -22,19 +23,55 @@ export interface ResolvedHost {
  * via Node's `lookup` option so the request never does its own DNS and
  * therefore can't be rebound during the gap.
  */
+// IPs routed around the VPN tunnel (Mullvad API, Darkreel). See
+// setVpnBypassIPs.
+let vpnBypassIPs = new Set<string>();
+
+/**
+ * Register the IPs that are routed around the VPN tunnel. safeResolveHost —
+ * the resolver every extraction/download egress path uses — refuses them,
+ * so a user-supplied URL can never be fetched outside the tunnel just
+ * because its host shares an IP with a bypass host (e.g. a CDN edge).
+ */
+export function setVpnBypassIPs(ips: string[]): void {
+  vpnBypassIPs = new Set(ips);
+}
+
 export async function safeResolveHost(hostname: string): Promise<ResolvedHost | null> {
-  if (isPrivateHostname(hostname)) return null;
-  if (isObfuscatedIPv4(hostname)) return null;
+  if (isBlockedHostLiteral(hostname)) return null;
+  const host = stripBrackets(hostname);
+  if (vpnBypassIPs.has(host)) return null;
   try {
-    const result = await lookup(hostname);
-    if (isPrivateIP(result.address)) return null;
+    // Check every address, not just the first: a name that returns one
+    // public and one private record must not be usable, since the caller's
+    // connect could otherwise land on either depending on resolver order.
+    const results = await lookup(host, { all: true });
+    if (results.length === 0 || results.some((r) => isPrivateIP(r.address) || vpnBypassIPs.has(r.address))) return null;
     return {
-      address: result.address,
-      family: result.family === 6 ? 6 : 4,
+      address: results[0].address,
+      family: results[0].family === 6 ? 6 : 4,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Checks a hostname without resolving it: private names (localhost,
+ * *.local, *.internal), obfuscated IPv4 encodings, and IP literals in any
+ * blocked range. This is the whole check available when an upstream proxy
+ * resolves names — resolving locally too would leak every target hostname
+ * to the host's resolver, which the proxy is there to avoid.
+ */
+export function isBlockedHostLiteral(hostname: string): boolean {
+  if (isPrivateHostname(hostname)) return true;
+  if (isObfuscatedIPv4(hostname)) return true;
+  const host = stripBrackets(hostname);
+  return isIP(host) !== 0 && isPrivateIP(host);
+}
+
+function stripBrackets(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
 }
 
 /**
@@ -91,39 +128,33 @@ export function pinnedLookup(resolved: ResolvedHost) {
  * Resolves DNS twice to detect DNS rebinding attacks.
  * Prevents SSRF attacks against internal network services.
  */
-export async function isPrivateUrl(url: string): Promise<boolean> {
+export async function isPrivateUrl(url: string, opts: { resolve?: boolean } = {}): Promise<boolean> {
   try {
     const parsed = new URL(url);
     const hostname = parsed.hostname;
 
-    // Block obviously private hostnames
-    if (isPrivateHostname(hostname)) return true;
+    // Behind an upstream proxy the proxy resolves names; only the literal
+    // checks apply (see isBlockedHostLiteral).
+    if (opts.resolve === false) return isBlockedHostLiteral(hostname);
+    if (isBlockedHostLiteral(hostname)) return true;
+    const host = stripBrackets(hostname);
 
-    // Reject obfuscated IPv4 encodings outright. Node's URL parser accepts
-    // decimal (http://2130706433/), hex (http://0x7f.0.0.1/), and
-    // leading-zero octal (http://0177.0.0.1/) forms that skip our
-    // isPrivateIP dotted-decimal regexes. getaddrinfo usually normalizes
-    // these but the behavior is libc-dependent — reject at the source.
-    if (isObfuscatedIPv4(hostname)) return true;
-
-    // Resolve DNS and check the resulting IP (retry once on transient failure)
-    let firstAddress: string;
+    // Resolve DNS and check every resulting IP (retry once on transient failure)
+    let addresses: string[];
     try {
-      const result = await lookup(hostname);
-      firstAddress = result.address;
+      addresses = (await lookup(host, { all: true })).map((r) => r.address);
     } catch {
       // Retry once — transient DNS failures are common with CDNs
       try {
         await delay(250);
-        const result = await lookup(hostname);
-        firstAddress = result.address;
+        addresses = (await lookup(host, { all: true })).map((r) => r.address);
       } catch {
         // DNS resolution failed twice — reject (fail closed)
         return true;
       }
     }
 
-    if (isPrivateIP(firstAddress)) return true;
+    if (addresses.length === 0 || addresses.some(isPrivateIP)) return true;
 
     // Re-resolve after a short delay to detect DNS rebinding.
     // A rebinding attack flips a public IP to a private one between lookups.
@@ -131,8 +162,8 @@ export async function isPrivateUrl(url: string): Promise<boolean> {
     await delay(500);
 
     try {
-      const result2 = await lookup(hostname);
-      if (isPrivateIP(result2.address)) return true;
+      const second = await lookup(host, { all: true });
+      if (second.some((r) => isPrivateIP(r.address))) return true;
     } catch {
       // Second lookup failed but first already resolved to a public IP — allow
     }
@@ -178,26 +209,47 @@ function isPrivateHostname(hostname: string): boolean {
   );
 }
 
-function isPrivateIP(ip: string): boolean {
-  // IPv4 private/reserved ranges
-  if (/^127\./.test(ip)) return true;                          // loopback
-  if (/^10\./.test(ip)) return true;                           // Class A private
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;     // Class B private
-  if (/^192\.168\./.test(ip)) return true;                     // Class C private
-  if (/^169\.254\./.test(ip)) return true;                     // link-local
-  if (/^0\./.test(ip)) return true;                            // "this" network
-  if (/^100\.(6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./.test(ip)) return true; // CGNAT
+// Every range a user-supplied URL must never reach. Checked with
+// net.BlockList, which also matches IPv4-mapped IPv6 (::ffff:a.b.c.d in
+// either notation) against the IPv4 rules.
+const BLOCKED_RANGES: Array<[string, number, 'ipv4' | 'ipv6']> = [
+  ['0.0.0.0', 8, 'ipv4'],        // "this" network
+  ['10.0.0.0', 8, 'ipv4'],       // private
+  ['100.64.0.0', 10, 'ipv4'],    // CGNAT
+  ['127.0.0.0', 8, 'ipv4'],      // loopback
+  ['169.254.0.0', 16, 'ipv4'],   // link-local (incl. cloud metadata)
+  ['172.16.0.0', 12, 'ipv4'],    // private (incl. Docker bridges)
+  ['192.0.0.0', 24, 'ipv4'],     // IETF protocol assignments
+  ['192.0.2.0', 24, 'ipv4'],     // TEST-NET-1
+  ['192.88.99.0', 24, 'ipv4'],   // 6to4 relay anycast
+  ['192.168.0.0', 16, 'ipv4'],   // private
+  ['198.18.0.0', 15, 'ipv4'],    // benchmarking
+  ['198.51.100.0', 24, 'ipv4'],  // TEST-NET-2
+  ['203.0.113.0', 24, 'ipv4'],   // TEST-NET-3
+  ['224.0.0.0', 4, 'ipv4'],      // multicast
+  ['240.0.0.0', 4, 'ipv4'],      // reserved + broadcast
+  ['::', 96, 'ipv6'],            // unspecified, loopback, IPv4-compatible
+  ['64:ff9b::', 96, 'ipv6'],     // NAT64 (wraps any IPv4)
+  ['64:ff9b:1::', 48, 'ipv6'],   // local-use NAT64
+  ['100::', 64, 'ipv6'],         // discard
+  ['2001::', 32, 'ipv6'],        // Teredo (embeds IPv4)
+  ['2001:db8::', 32, 'ipv6'],    // documentation
+  ['2002::', 16, 'ipv6'],        // 6to4 (embeds IPv4)
+  ['fc00::', 7, 'ipv6'],         // unique local
+  ['fe80::', 10, 'ipv6'],        // link-local
+  ['fec0::', 10, 'ipv6'],        // deprecated site-local
+  ['ff00::', 8, 'ipv6'],         // multicast
+];
 
-  // IPv6 private/reserved
-  if (ip === '::1' || ip === '::') return true;                // loopback / all-zeros
-  if (/^f[cd]/i.test(ip)) return true;                         // unique local (fc00::/fd00::)
-  if (/^fe80:/i.test(ip)) return true;                         // link-local
+const blockList = new BlockList();
+for (const [net, prefix, type] of BLOCKED_RANGES) blockList.addSubnet(net, prefix, type);
 
-  // IPv4-mapped IPv6 (::ffff:x.x.x.x)
-  const v4mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  if (v4mapped) return isPrivateIP(v4mapped[1]);
-
-  return false;
+/** True for any address in a blocked range — and for anything that isn't an IP literal. */
+export function isPrivateIP(ip: string): boolean {
+  const version = isIP(ip);
+  if (version === 4) return blockList.check(ip, 'ipv4');
+  if (version === 6) return blockList.check(ip, 'ipv6');
+  return true;
 }
 
 /**
@@ -211,12 +263,11 @@ export async function isConfirmedPrivateUrl(url: string): Promise<boolean> {
     const parsed = new URL(url);
     const hostname = parsed.hostname;
 
-    if (isPrivateHostname(hostname)) return true;
-    if (isObfuscatedIPv4(hostname)) return true;
+    if (isBlockedHostLiteral(hostname)) return true;
 
     try {
-      const result = await lookup(hostname);
-      if (isPrivateIP(result.address)) return true;
+      const results = await lookup(stripBrackets(hostname), { all: true });
+      if (results.some((r) => isPrivateIP(r.address))) return true;
     } catch {
       return false; // DNS failed — let the HTTP client handle it
     }

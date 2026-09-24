@@ -4,7 +4,7 @@ import { scanDomForVideos } from './dom-scanner.js';
 import { autoClickPlay } from './auto-play.js';
 import { ExtractionError } from '../utils/errors.js';
 import type { ProxyConfig } from '../proxy/types.js';
-import { getPlaywrightProxy } from '../proxy/index.js';
+import { SsrfProxy } from '../utils/ssrf-proxy.js';
 import type { ExtractionResult, ExtractOptions, VideoSource } from './types.js';
 
 export type { ExtractionResult, ExtractOptions, VideoSource } from './types.js';
@@ -80,27 +80,79 @@ class ExtractionSemaphore {
 
 const extractionSem = new ExtractionSemaphore();
 
+/**
+ * Chromium's own sandbox, on unless CHROMIUM_SANDBOX=false. This browser
+ * loads arbitrary attacker-controlled pages; without the sandbox a renderer
+ * bug is code execution as the ppvda user (DB, JWT secret, supervisor
+ * socket). In Docker it needs the user-namespace-enabled seccomp profile
+ * shipped as chromium-seccomp.json (see docker-compose.yml).
+ */
+const CHROMIUM_SANDBOX = process.env.CHROMIUM_SANDBOX !== 'false';
+
+/** Environment for the browser process: nothing secret (JWT_SECRET,
+ *  MULLVAD_ACCOUNT, admin password) is inherited from Node's env. */
+function browserEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'FONTCONFIG_PATH']) {
+    const v = process.env[key];
+    if (v !== undefined) env[key] = v;
+  }
+  return env;
+}
+
 let browserInstance: Browser | null = null;
+let browserProxy: SsrfProxy | null = null;
+let browserLaunch: Promise<Browser> | null = null;
 let currentProxyRaw: string | undefined;
 
 async function getBrowser(proxy?: ProxyConfig): Promise<Browser> {
   // If proxy config changed, close and relaunch
   if (browserInstance && currentProxyRaw !== proxy?.raw) {
-    await browserInstance.close().catch(() => {});
-    browserInstance = null;
+    await closeBrowser();
   }
+  if (browserInstance) return browserInstance;
+  // Concurrent extractions share one launch instead of each starting a
+  // browser (and leaking all but the last).
+  if (!browserLaunch) {
+    browserLaunch = launchBrowser(proxy).finally(() => { browserLaunch = null; });
+  }
+  return browserLaunch;
+}
 
-  if (!browserInstance) {
+async function launchBrowser(proxy?: ProxyConfig): Promise<Browser> {
+  // Every request the browser makes — navigations, subresources, redirects,
+  // fetch/XHR/WebSocket from page JS — goes through a local SsrfProxy that
+  // resolves, validates and pins the target (or, with PROXY_URL, validates
+  // and chains to it). Host-rules alone only matched literal IPs in URLs:
+  // any public DNS name pointing at 127.0.0.1 or an internal address, and
+  // any rebinding, went straight through. Playwright adds `<-loopback>` to
+  // the bypass list, so loopback is proxied (and refused) too.
+  const ssrf = new SsrfProxy(proxy);
+  await ssrf.start();
+  try {
     // This browser navigates arbitrary user-supplied URLs, so the bundled
     // Chromium is a direct exposure surface. Keep `playwright` on the latest
     // patch release — dependabot opens weekly PRs (.github/dependabot.yml).
-    browserInstance = await chromium.launch({
+    const browser = await chromium.launch({
       headless: true,
+      chromiumSandbox: CHROMIUM_SANDBOX,
+      env: browserEnv(),
+      proxy: { server: ssrf.url() },
       args: [
         '--disable-blink-features=AutomationControlled',
-        // Block direct navigation to private/reserved IP addresses (SSRF defense-in-depth).
-        // DNS rebinding is handled by isPrivateUrl double-resolve at the route level.
+        // WebRTC's STUN/ICE is UDP and doesn't use the HTTP proxy, so a page
+        // could otherwise learn the host's real public IP.
+        '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+        '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+        // QUIC is UDP too; keep all traffic on proxied TCP.
+        '--disable-quic',
+        // Block direct navigation to private/reserved IP literals. Defense in
+        // depth only — the SsrfProxy above is the actual enforcement point.
+        // The EXCLUDE keeps the rules from also blackholing the SsrfProxy's
+        // own 127.0.0.1 listener; page requests to loopback are still sent
+        // to that proxy (Playwright's `<-loopback>`), which refuses them.
         '--host-rules='
+          + 'EXCLUDE 127.0.0.1, '
           + 'MAP 127.* ~NOTFOUND, '
           + 'MAP 10.* ~NOTFOUND, '
           + 'MAP 172.16.* ~NOTFOUND, '
@@ -178,12 +230,24 @@ async function getBrowser(proxy?: ProxyConfig): Promise<Browser> {
           // private). The route-level isPrivateUrl also blocks this.
           + 'MAP [64:ff9b:*] ~NOTFOUND',
       ],
-      ...(proxy ? { proxy: getPlaywrightProxy(proxy) } : {}),
     });
+    browserInstance = browser;
+    browserProxy = ssrf;
     currentProxyRaw = proxy?.raw;
+    return browser;
+  } catch (err) {
+    await ssrf.stop();
+    const msg = err instanceof Error ? err.message : String(err);
+    if (CHROMIUM_SANDBOX && /sandbox|namespace|seccomp|clone|setuid/i.test(msg)) {
+      throw new Error(
+        'Chromium failed to launch with its sandbox enabled. In Docker this needs the '
+        + 'seccomp profile from docker-compose.yml (security_opt: seccomp=chromium-seccomp.json). '
+        + 'Setting CHROMIUM_SANDBOX=false disables the sandbox and is not recommended. '
+        + `Cause: ${msg}`,
+      );
+    }
+    throw err;
   }
-
-  return browserInstance;
 }
 
 async function createStealthContext(browser: Browser): Promise<BrowserContext> {
@@ -203,6 +267,10 @@ export async function closeBrowser(): Promise<void> {
   if (browserInstance) {
     await browserInstance.close().catch(() => {});
     browserInstance = null;
+  }
+  if (browserProxy) {
+    await browserProxy.stop();
+    browserProxy = null;
   }
 }
 

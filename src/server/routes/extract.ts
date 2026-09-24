@@ -93,7 +93,7 @@ export async function extractRoutes(
         return;
       }
 
-      if (await isPrivateUrl(url)) {
+      if (await isPrivateUrl(url, { resolve: !proxy })) {
         reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
         return;
       }
@@ -154,7 +154,7 @@ export async function extractRoutes(
         return;
       }
 
-      if (await isPrivateUrl(url)) {
+      if (await isPrivateUrl(url, { resolve: !proxy })) {
         reply.raw.writeHead(400, { 'Content-Type': 'application/json' });
         reply.raw.end(JSON.stringify({ success: false, error: 'Private/internal URLs are not allowed' }));
         return;

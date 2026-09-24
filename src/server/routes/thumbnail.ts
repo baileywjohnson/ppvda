@@ -3,7 +3,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { spawnFfmpegStream } from '../../downloader/ffmpeg.js';
 import type { ProxyConfig } from '../../proxy/types.js';
-import { isPrivateUrl, pinnedLookup, safeResolveHost } from '../../utils/url.js';
+import { isBlockedHostLiteral, isPrivateUrl, pinnedLookup, safeResolveHost } from '../../utils/url.js';
 import { getHttpAgent } from '../../proxy/index.js';
 import { ffmpegRouteSem } from './ffmpeg-concurrency.js';
 
@@ -56,7 +56,7 @@ export async function thumbnailRoutes(
         return;
       }
 
-      if (await isPrivateUrl(videoUrl)) {
+      if (await isPrivateUrl(videoUrl, { resolve: !opts.proxyConfig })) {
         reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
         return;
       }
@@ -103,6 +103,9 @@ async function handleImageProxy(
       return;
     }
     lookup = pinnedLookup(resolved);
+  } else if (isBlockedHostLiteral(parsed.hostname)) {
+    reply.status(400).send({ success: false, error: 'Private/internal URLs are not allowed' });
+    return;
   }
   const mod = parsed.protocol === 'https:' ? https : http;
 

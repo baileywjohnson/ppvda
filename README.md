@@ -32,7 +32,7 @@
 - **Web UI** — Paste a URL, see extracted videos, download to your browser or upload to Darkreel
 - **Progressive extraction** — Video sources stream to the UI as they're discovered via Server-Sent Events (~2-3 seconds for first results)
 - **Video metadata** — Duration, resolution, and file size probed in real time via ffprobe
-- **Streaming download** — Videos pipe through ffmpeg to your browser. The remuxed file is staged in `tmp/` only for the duration of the response, then securely overwritten and unlinked; the downloaded file has a different hash from the original
+- **Streaming download** — Videos pipe through ffmpeg to your browser. The remuxed file is staged in a private per-request directory under `DOWNLOAD_DIR` only for the duration of the response, then securely overwritten and unlinked; the downloaded file has a different hash from the original
 - **Ad filtering** — Built-in blocklist of ~28 ad-tech domains, plus size/duration filtering
 - **Darkreel integration** — Background jobs: download, encrypt in-process (X25519 sealed-box to your Darkreel public key), upload to your encrypted library, securely delete local file. PPVDA never holds your Darkreel password — connect once via a copy-paste authorization code and revoke anytime from Darkreel's Connected Apps panel
 - **Mullvad VPN** — Built-in WireGuard tunnel. All extraction and download traffic routes through Mullvad with country switching from the admin panel
@@ -76,7 +76,7 @@ Typical setup: PPVDA runs on a privacy-friendly VPS behind a VPN. Darkreel runs 
 | Direct (`.mp4`, `.webm`, etc.) | HTTP fetch |
 | Image | Direct HTTP fetch |
 
-Browser downloads (`/stream-download`) remux to fragmented MP4 (`frag_keyframe+empty_moov`), which changes the file hash relative to the original. The remuxed output is written to `tmp/` for the duration of the response, streamed to the client, then overwritten with random bytes and unlinked — it is not retained after the request. Job-pipeline downloads follow the same fragmentation, then encrypt and upload before the local copy is securely deleted.
+Browser downloads (`/stream-download`) remux to fragmented MP4 (`frag_keyframe+empty_moov`), which changes the file hash relative to the original. The remuxed output is written to a private per-request directory under `DOWNLOAD_DIR` for the duration of the response, streamed to the client, then overwritten with random bytes and unlinked — it is not retained after the request. Job-pipeline downloads follow the same fragmentation, then encrypt and upload before the local copy is securely deleted.
 
 ### Job pipeline
 
@@ -216,17 +216,22 @@ openssl enc -d -aes-256-cbc -pbkdf2 \
 
 ```bash
 cd /opt/ppvda
-git pull
+git fetch --tags && git verify-tag vX.Y.Z && git checkout vX.Y.Z
 docker compose up --build -d
 ```
 
-Or use the auto-updater:
+Or use the auto-updater. It deploys only the newest `vX.Y.Z` tag whose SSH signature verifies against `/etc/ppvda/allowed_signers`, and only as a fast-forward of what's running — it never deploys an unsigned commit or rolls back. It runs as root and rebuilds the container, so an unverified update would be root on the host.
 
 ```bash
+# one-time: pin the release signer's SSH public key
+echo "release-signer ssh-ed25519 AAAA..." | sudo tee /etc/ppvda/allowed_signers
+
 sudo ./update.sh              # check once
 sudo ./update.sh --install    # daily cron at 4 AM
 sudo ./update.sh --uninstall  # remove cron
 ```
+
+Releases are signed tags: `git config gpg.format ssh && git config user.signingkey ~/.ssh/id_ed25519.pub`, then `git tag -s v1.2.3 -m v1.2.3 && git push origin v1.2.3`.
 
 ## Privacy & security
 
@@ -277,7 +282,10 @@ Recovery Code ──> Decrypts: recovery_mk (AES-256-GCM, AAD=userID) ──> ma
   - **Route-level validation** rejects obvious private/reserved addresses up front: RFC1918, loopback, link-local, cloud-metadata, IPv4-mapped IPv6, and obfuscated IPv4 encodings (decimal `http://2130706433/`, hex `http://0x7f.0.0.1/`, leading-zero octal `http://0177.0.0.1/`).
   - **Node direct downloads** resolve DNS once via `safeResolveHost`, then pin the resolved address into `http.get`/`https.get` via the `lookup` option. The HTTP client never does its own DNS lookup, so a rebinding server can't flip public → private between our validation and the actual connect. Redirects recurse through the same pinned flow so every hop is validated against the IP we just connected to. TLS hostname verification still uses the original URL hostname, so cert checks work correctly against the pinned IP.
   - **ffmpeg / ffprobe** egress goes through a loopback-only HTTP forward proxy started per invocation. Every `CONNECT` target (HTTPS) and every absolute-URI request (HTTP) is passed through `safeResolveHost` before the tunnel opens or the request is forwarded — so even segment URIs inside an HLS/DASH manifest, which ffmpeg fetches on its own and we can't pre-resolve, are validated. The proxy binds random loopback, refuses connections from anything but 127.0.0.1, and shuts down when ffmpeg exits.
-  - **Chromium** extraction is defended at the browser layer via `--host-rules` mapping private CIDRs to `NOTFOUND` before any navigation attempt.
+  - **Chromium** is launched with that same SSRF proxy as its proxy server, so every navigation, subresource, redirect and fetch/XHR/WebSocket from page JS is resolved and validated there (loopback included — it is not bypassed). `--host-rules` mapping private CIDRs to `NOTFOUND` remains as defense in depth. WebRTC is restricted to proxied connections (`disable_non_proxied_udp`) and QUIC is off, so a page can't learn the server's IP over STUN.
+  - **With `PROXY_URL`** the SSRF proxy chains to your proxy instead of connecting directly: targets are checked by their literal host (private names, IP literals, obfuscated encodings) and names are resolved by your proxy, never by this host's resolver. SOCKS URLs use remote resolution (`socks5h`/`socks4a`) for Node downloads as well. If your proxy runs on the same host, it can reach that host's loopback services by name — prefer a remote proxy.
+  - IPs routed around the VPN (`VPN_BYPASS_HOSTS`, the Mullvad API) are refused as extraction targets, so a URL whose host shares an IP with them (e.g. a CDN edge) can't be fetched outside the tunnel.
+  - **Chromium sandbox** is on (`CHROMIUM_SANDBOX=false` disables it; not recommended). In Docker it needs the seccomp profile in `chromium-seccomp.json`, which `docker-compose.yml` applies.
   - `file://` is removed from the ffmpeg/ffprobe protocol whitelist, so a user-influenced URL can't be turned into a local-file-read primitive.
   - Admin-facing errors from Darkreel's delegation-exchange endpoint have their upstream response body stripped before surfacing, so an admin intentionally targeting a private URL (same-LAN Darkreel) can't be turned into an SSRF response-body leak.
 - **No shell injection** — All subprocesses (ffmpeg, ffprobe) spawned with argument arrays, never through a shell. No Darkreel password ever passes through a subprocess environment — the Darkreel client is in-process Node
@@ -461,7 +469,8 @@ All configuration is via environment variables (or `.env` file).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROXY_URL` | | Proxy URL (e.g., `socks5://user:pass@host:port`) |
+| `PROXY_URL` | | Proxy URL (e.g., `socks5://user:pass@host:port`). All egress — Chromium, ffmpeg, Node downloads — goes through it, and DNS is resolved by the proxy |
+| `CHROMIUM_SANDBOX` | `true` | Chromium's renderer sandbox. Needs the `chromium-seccomp.json` profile in Docker. Set `false` only if your host can't run it |
 
 ### Host filtering
 
@@ -479,7 +488,7 @@ Comma-separated domain lists with subdomain matching.
 |----------|-------------|
 | `MULLVAD_ACCOUNT` | Mullvad account number |
 | `MULLVAD_LOCATION` | Country code (`se`) or country-city (`se-mma`, `us-nyc`) |
-| `MULLVAD_CONFIG_DIR` | WireGuard config directory (default: `./mullvad`) |
+| `MULLVAD_CONFIG_DIR` | Ignored. The WireGuard config (private key) is kept by `wg-supervisor` in its root-only `/run/wg-supervisor` |
 | `VPN_BYPASS_HOSTS` | Comma-separated hostnames to route outside the VPN |
 
 ### Features

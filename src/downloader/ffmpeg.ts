@@ -2,7 +2,6 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import { FfmpegError, TimeoutError } from '../utils/errors.js';
 import type { ProxyConfig } from '../proxy/types.js';
-import { getFfmpegEnv } from '../proxy/index.js';
 import { SsrfProxy } from '../utils/ssrf-proxy.js';
 
 // Protocol whitelist for ffmpeg/ffprobe URL inputs. `file` is intentionally
@@ -17,13 +16,15 @@ import { SsrfProxy } from '../utils/ssrf-proxy.js';
 export const FFMPEG_PROTOCOL_WHITELIST = 'http,https,httpproxy,tcp,tls,crypto';
 
 // Set up a subprocess environment for ffmpeg/ffprobe with an SSRF-filtering
-// choke-point in front of its HTTP egress. When the operator has configured
-// an explicit `proxyConfig` (SOCKS or HTTP proxy via PROXY_URL) we trust it
-// and skip the SSRF proxy — they've consciously opted into that network
-// path. Otherwise, we start a loopback-only HTTP proxy that every CONNECT
-// target and absolute-URI request has to pass `safeResolveHost` before the
+// choke-point in front of its HTTP egress: a loopback-only HTTP proxy that
+// every CONNECT target and absolute-URI request has to pass before the
 // tunnel opens, so ffmpeg cannot reach a private IP even via manifest
 // redirects or DNS rebinding between our validation and its connect.
+//
+// This applies with a PROXY_URL too — the SsrfProxy chains to it. ffmpeg
+// only honours `http_proxy` values starting with http://, so handing it a
+// socks5:// or https:// proxy URL (as this used to) made it ignore the
+// proxy entirely and connect from the host's real IP, unfiltered.
 export async function setupSubprocessEnv(proxyConfig?: ProxyConfig): Promise<{
   env: Record<string, string>;
   cleanup: () => Promise<void>;
@@ -33,11 +34,7 @@ export async function setupSubprocessEnv(proxyConfig?: ProxyConfig): Promise<{
     HOME: process.env.HOME ?? '',
     TMPDIR: process.env.TMPDIR ?? '',
   };
-  if (proxyConfig) {
-    Object.assign(env, getFfmpegEnv(proxyConfig));
-    return { env, cleanup: async () => {} };
-  }
-  const proxy = new SsrfProxy();
+  const proxy = new SsrfProxy(proxyConfig);
   await proxy.start();
   const url = proxy.url();
   // Both lowercase (ffmpeg/libcurl convention) and uppercase — different
