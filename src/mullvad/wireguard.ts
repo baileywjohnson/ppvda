@@ -29,6 +29,13 @@ const WG_PORT = 51820;
  * regex-validates each field and reconstructs the config from a fixed
  * template — see wg-supervisor/main.go:doBringup.
  *
+ * The supervisor also checks the peer against Mullvad's relay list, which it
+ * fetches itself from api.mullvad.net (wg-supervisor/relaycheck.go): the
+ * public key, `ipv4AddrIn` and port must match an active WireGuard relay,
+ * `address` must be a /32 in Mullvad's 10.64.0.0/10 and `dns` 10.64.0.1. It
+ * fetches over the pinned api.mullvad.net bypass, so `addRouteExceptions`
+ * must have routed that host first (setupMullvad/switchMullvadCountry do).
+ *
  * Routing context (rendered identically in the supervisor):
  *   - `Table = off` — wg-quick skips fwmark-based policy routing, which
  *     would need the `net.ipv4.conf.all.src_valid_mark` sysctl (a

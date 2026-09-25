@@ -13,8 +13,11 @@
 //     connection is authenticated via SO_PEERCRED against a configured
 //     allow-uid; anything else is closed immediately.
 //
-//   - No network listeners, no HTTP, no TLS, no user input beyond the RPC
-//     payload. The attack surface is one Unix socket with a known peer.
+//   - No network listeners and no user input beyond the RPC payload. The
+//     attack surface is one Unix socket with a known peer. The only
+//     outbound connection the supervisor makes is its own HTTPS fetch of
+//     Mullvad's relay list (relaycheck.go), to a fixed URL, dialled at the
+//     pinned api.mullvad.net addresses.
 //
 //   - The protocol is intentionally narrow: four fixed operations, each
 //     with a small typed payload. No shell, no template evaluation, no
@@ -29,6 +32,10 @@
 //     too. So nothing a caller supplies may widen what leaves the host
 //     outside the tunnel. The bypass hosts are fixed by -bypass-hosts at
 //     startup and resolved here; ADD_ROUTES only picks from that list.
+//     BRINGUP only accepts a relay (public key, IPv4, port) that Mullvad's
+//     relay list — fetched by the supervisor itself — lists as an active
+//     WireGuard relay, so the kill switch never opens to, and the
+//     handshake never reaches, an endpoint the caller made up.
 package main
 
 import (
@@ -56,13 +63,11 @@ import (
 )
 
 const (
-	maxFrameBytes    = 64 * 1024
+	maxFrameBytes     = 64 * 1024
 	subprocessTimeout = 30 * time.Second
 	defaultSocketPath = "/run/ppvda/wg.sock"
 	defaultConfigDir  = "/run/wg-supervisor"
 	wgInterface       = "wg0"
-	// mullvadDNS is Mullvad's in-tunnel resolver, reachable only over wg0.
-	mullvadDNS = "10.64.0.1"
 	// Bounds on the pinned bypass set, so a hostile resolver answer can't
 	// grow the kill switch or the routing table without limit.
 	maxBypassHosts      = 16
@@ -83,6 +88,10 @@ const (
 // override it — i.e. the manual Docker path in the README — failed BRINGUP
 // with "configDir must be an absolute path".
 var configDir = defaultConfigDir
+
+// relays verifies BRINGUP endpoints against Mullvad's relay list; see
+// relaycheck.go. Its URL and trust roots are fixed, never caller-supplied.
+var relays = newRelayVerifier()
 
 // Kill-switch state. All mutation happens inside dispatch, which runs under
 // opMu, so no further locking is needed.
@@ -130,12 +139,12 @@ type request struct {
 	// rendered config string.
 	ConfigDir      string `json:"configDir,omitempty"`
 	PrivateKey     string `json:"privateKey,omitempty"`     // base64 WG key (44 chars, "=" suffix)
-	Address        string `json:"address,omitempty"`        // IPv4 CIDR ("10.x.y.z/32")
-	DNS            string `json:"dns,omitempty"`            // IPv4 ("10.64.0.1")
-	PeerPublicKey  string `json:"peerPublicKey,omitempty"`  // base64 WG key
-	PeerEndpoint   string `json:"peerEndpoint,omitempty"`   // "ipv4:port"
+	Address        string `json:"address,omitempty"`        // device's tunnel IP, a /32 in 10.64.0.0/10
+	DNS            string `json:"dns,omitempty"`            // empty or exactly mullvadDNS; always rendered as mullvadDNS
+	PeerPublicKey  string `json:"peerPublicKey,omitempty"`  // base64 WG key; must be a listed Mullvad relay's
+	PeerEndpoint   string `json:"peerEndpoint,omitempty"`   // "ipv4:port"; that relay's ipv4_addr_in + an advertised port
 	PeerAllowedIPs string `json:"peerAllowedIPs,omitempty"` // exact "0.0.0.0/0" or "::/0"
-	RelayIP        string `json:"relayIP,omitempty"`        // IPv4 of the relay endpoint, for bypass route
+	RelayIP        string `json:"relayIP,omitempty"`        // must equal PeerEndpoint's address (bypass route)
 
 	// Gateway is only a fallback for when the boot-time default gateway
 	// could not be captured; bootGateway is used whenever it is known.
@@ -204,6 +213,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("-bypass-hosts: %v", err)
 	}
+	// BRINGUP's relay check fetches the relay list from api.mullvad.net at
+	// the addresses ADD_ROUTES pinned for it, so it must always be routable.
+	// The entrypoint includes it too; this keeps the check working even if
+	// the supervisor is started some other way.
+	allow[relayAPIHost] = true
 	bypassAllow = allow
 	names := make([]string, 0, len(allow))
 	for h := range allow {
@@ -343,9 +357,11 @@ func dispatch(r request) response {
 // authenticated but otherwise unprivileged) caller would let any
 // compromise of the PPVDA process escalate to root.
 //
-// All paths are restricted to the caller-supplied configDir which must
-// be an absolute path; we don't tolerate relative paths because they
-// would be resolved against the supervisor's cwd, not PPVDA's.
+// The peer must be a relay Mullvad's own relay list names (relaycheck.go),
+// checked before the kill switch, routes or config are touched.
+//
+// The config is written to the pinned configDir; the caller's configDir is
+// ignored.
 func doBringup(r request) response {
 	// r.ConfigDir is accepted for wire compatibility but deliberately ignored
 	// in favour of the pinned `configDir` — see the comment on that var.
@@ -361,17 +377,30 @@ func doBringup(r request) response {
 	if !ipv4CIDRRe.MatchString(r.Address) {
 		return response{Error: "invalid address"}
 	}
-	if !ipv4Re.MatchString(r.DNS) {
-		return response{Error: "invalid dns"}
+	addr, err := checkTunnelAddress(r.Address)
+	if err != nil {
+		return response{Error: "invalid address: " + err.Error()}
+	}
+	// The tunnel's resolver is always Mullvad's; the field is accepted for
+	// wire compatibility but anything else is refused, not rewritten.
+	if r.DNS != "" && r.DNS != mullvadDNS {
+		return response{Error: "invalid dns: must be " + mullvadDNS}
 	}
 	if !ipv4PortRe.MatchString(r.PeerEndpoint) {
+		return response{Error: "invalid peerEndpoint"}
+	}
+	ep, err := netip.ParseAddrPort(r.PeerEndpoint)
+	if err != nil || !ep.Addr().Is4() || ep.Port() == 0 {
 		return response{Error: "invalid peerEndpoint"}
 	}
 	if !allowedIPsSet[r.PeerAllowedIPs] {
 		return response{Error: "invalid peerAllowedIPs"}
 	}
-	if !ipv4Re.MatchString(r.RelayIP) {
-		return response{Error: "invalid relayIP"}
+	// relayIP (the /32 routed around the tunnel) must be the endpoint's own
+	// address; otherwise a caller could route an arbitrary IP via the real
+	// gateway.
+	if relayIP, err := netip.ParseAddr(r.RelayIP); err != nil || relayIP != ep.Addr() {
+		return response{Error: "invalid relayIP: must be the peerEndpoint address"}
 	}
 	if !ipv4Re.MatchString(r.Gateway) {
 		return response{Error: "invalid gateway"}
@@ -383,6 +412,20 @@ func doBringup(r request) response {
 		gateway = r.Gateway
 	}
 
+	// Only a relay Mullvad lists may be the peer. This runs before any
+	// state changes, so a refused endpoint never reaches the kill switch or
+	// the routing table. The list is fetched over api.mullvad.net's pinned
+	// bypass addresses, which are reachable before the first BRINGUP (the
+	// kill switch isn't installed yet and ADD_ROUTES has routed them) and
+	// after it (they are kill-switch exceptions with /32 routes via the
+	// real gateway, whether or not the tunnel is up).
+	if err := relays.verify(r.PeerPublicKey, ep, relayAPIDialAddrs); err != nil {
+		log.Printf("BRINGUP refused: relay %s: %v", ep, err)
+		return response{Error: "relay check: " + err.Error()}
+	}
+	endpoint := ep.String()
+	relayIP := ep.Addr().String()
+
 	// Render the config from a fixed template. Every interpolation point is
 	// a value that has just passed a tight regex / set-membership check, so
 	// the resulting string cannot contain shell metacharacters or extra
@@ -390,28 +433,28 @@ func doBringup(r request) response {
 	// but their contents are entirely supervisor-controlled.
 	cfg := "[Interface]\n" +
 		"PrivateKey = " + r.PrivateKey + "\n" +
-		"Address = " + r.Address + "\n" +
-		"DNS = " + r.DNS + "\n" +
+		"Address = " + addr.String() + "\n" +
+		"DNS = " + mullvadDNS + "\n" +
 		"Table = off\n" +
-		"PostUp = ip route add " + r.RelayIP + "/32 via " + gateway +
+		"PostUp = ip route add " + relayIP + "/32 via " + gateway +
 		" && ip route replace default dev " + wgInterface + "\n" +
 		// On teardown the default route becomes unreachable rather than
 		// reverting to the real gateway: with the tunnel down, nothing
 		// should have a route out except the explicit /32 bypasses.
 		"PreDown = ip route replace unreachable default" +
-		" ; ip route del " + r.RelayIP + "/32 via " + gateway + "\n" +
+		" ; ip route del " + relayIP + "/32 via " + gateway + "\n" +
 		"\n" +
 		"[Peer]\n" +
 		"PublicKey = " + r.PeerPublicKey + "\n" +
 		"AllowedIPs = " + r.PeerAllowedIPs + "\n" +
-		"Endpoint = " + r.PeerEndpoint + "\n"
+		"Endpoint = " + endpoint + "\n"
 
 	// The egress policy goes in before the tunnel comes up and is never
 	// removed: from the first BRINGUP on, nothing but the tunnel, the relay
 	// handshake and the bypass IPs can leave this network namespace —
 	// including across teardown, country switches and crashes of either
 	// process. If it can't be installed, refuse to bring the tunnel up.
-	relayEndpoint = r.PeerEndpoint
+	relayEndpoint = endpoint
 	if err := applyKillSwitch(); err != nil {
 		return response{Error: "kill switch: " + err.Error()}
 	}
@@ -440,6 +483,23 @@ func doBringup(r request) response {
 	tunnelUp = true
 
 	return response{OK: true}
+}
+
+// relayAPIDialAddrs returns the addresses the relay list may be fetched from:
+// the ones pinned for api.mullvad.net by ADD_ROUTES. The supervisor doesn't
+// route it on its own here — every bypass it routes is one Node asked for
+// and knows to keep extraction traffic away from — so if it hasn't been
+// routed, the fetch (and BRINGUP) fails closed.
+func relayAPIDialAddrs() ([]string, error) {
+	ips := pinnedHosts[relayAPIHost]
+	if len(ips) == 0 {
+		return nil, errors.New(relayAPIHost + " has not been routed around the tunnel (ADD_ROUTES must route it before BRINGUP)")
+	}
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, net.JoinHostPort(ip, "443"))
+	}
+	return out, nil
 }
 
 // doTeardown runs `wg-quick down <path>`, restores Docker's DNS resolver

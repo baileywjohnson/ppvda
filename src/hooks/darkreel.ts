@@ -56,11 +56,12 @@ export async function uploadToDarkreel(opts: DrkUploadOptions): Promise<DrkUploa
   } catch (err) {
     const code = errorCode(err);
     const dErr = err instanceof DarkreelError ? err.code : undefined;
-    // Refresh-token rejection usually means the user revoked the delegation
-    // from Darkreel's "Connected Apps" panel — surface that specifically so
-    // the UI can prompt re-connect.
+    // Refresh-token rejection means the user revoked the delegation from
+    // Darkreel's "Connected Apps" panel, or it expired (Darkreel drops
+    // delegations unused for 60 days or a year old) — surface that
+    // specifically so the UI can prompt re-connect.
     if (dErr === 'REVOKED' || dErr === 'SCOPE_MISMATCH') {
-      return { success: false, code, error: 'Darkreel delegation has been revoked — reconnect from PPVDA Settings' };
+      return { success: false, code, error: 'Darkreel connection was revoked or has expired (60 days unused, or a year old) — reconnect from PPVDA Settings' };
     }
     // The stored URL no longer passes validation (http for a non-admin,
     // a path, a host that now resolves to a private address, …).

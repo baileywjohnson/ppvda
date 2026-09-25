@@ -1,0 +1,49 @@
+{
+  "locations": {
+    "se-got": {"country": "Sweden", "city": "Gothenburg", "latitude": 57.70887, "longitude": 11.97456},
+    "us-nyc": {"country": "USA", "city": "New York, NY", "latitude": 40.73061, "longitude": -73.935242}
+  },
+  "openvpn": {
+    "relays": [],
+    "ports": [{"port": 1194, "protocol": "udp"}, {"port": 443, "protocol": "tcp"}]
+  },
+  "wireguard": {
+    "relays": [
+      {
+        "hostname": "se-got-wg-001", "location": "se-got", "active": true, "owned": true,
+        "provider": "31173", "stboot": true, "ipv4_addr_in": "185.213.154.66",
+        "include_in_country": true, "weight": 100,
+        "public_key": "5JMPeO7gXIbR5CnUa/NPNK4L5GqUnreF0/Bozai4pl4=",
+        "ipv6_addr_in": "2a03:1b20:5:f011::a01f", "daita": true,
+        "shadowsocks_extra_addr_in": ["185.213.154.70"],
+        "features": {"daita": {}, "quic": {"addr_in": ["185.213.154.71"], "domain": "se-got-wg-001.example"}}
+      },
+      {
+        "hostname": "us-nyc-wg-301", "location": "us-nyc", "active": true, "owned": false,
+        "provider": "M247", "stboot": true, "ipv4_addr_in": "146.70.165.2",
+        "include_in_country": true, "weight": 100,
+        "public_key": "IzqkjVCdJYC1AShILfzebchTlKCqVCt/SMEXolaS3Uc=",
+        "ipv6_addr_in": "2a0d:5600:24:1500::a01f"
+      },
+      {
+        "hostname": "us-nyc-wg-302", "location": "us-nyc", "active": false, "owned": false,
+        "provider": "M247", "stboot": true, "ipv4_addr_in": "146.70.165.130",
+        "include_in_country": true, "weight": 100,
+        "public_key": "gg5+xEYxjDYGeTEWrDM6wXmq4Q1Lx6kBsn6mm3u8VhU=",
+        "ipv6_addr_in": "2a0d:5600:24:1500::b01f"
+      }
+    ],
+    "port_ranges": [[53, 53], [123, 123], [4000, 33433], [33565, 51820], [52001, 60000]],
+    "shadowsocks_port_ranges": [[51900, 51949]],
+    "ipv4_gateway": "10.64.0.1",
+    "ipv6_gateway": "fc00:bbbb:bbbb:bb01::1"
+  },
+  "bridge": {
+    "relays": [
+      {"hostname": "se-got-br-001", "location": "se-got", "active": true, "owned": true,
+       "provider": "31173", "stboot": true, "ipv4_addr_in": "185.213.154.117",
+       "include_in_country": true, "weight": 100}
+    ],
+    "shadowsocks": [{"protocol": "tcp", "port": 443, "cipher": "aes-256-gcm", "password": "mullvad"}]
+  }
+}

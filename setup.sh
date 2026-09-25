@@ -248,7 +248,8 @@ cat > /usr/local/bin/ppvda-deploy << 'SCRIPT'
 set -euo pipefail
 
 COMMIT_SHA="${1:-}"
-REPO_DIR="/opt/ppvda"
+# setup.sh records the checkout it deployed from (root-owned).
+REPO_DIR="$(cat /etc/ppvda/repo_dir 2>/dev/null || echo /opt/ppvda)"
 SIGNING_PUB="/etc/ppvda/signing.pub"
 HASH_FILE="/home/deploy/commit.hash"
 SIG_FILE="/home/deploy/commit.sig"
@@ -316,7 +317,7 @@ if [ -n "$RELEASE_SIGNER_KEY" ]; then
 fi
 if [ ! -f /etc/ppvda/signing.pub ]; then
   warn "No signing public key found at /etc/ppvda/signing.pub"
-  warn "CI/CD signature verification will be skipped without it."
+  warn "Until it's installed, the CI deploy hook (ppvda-deploy) refuses every deploy."
   warn "Copy your signing public key to the VPS:"
   warn "  scp ppvda_signing.pub youruser@server:/etc/ppvda/signing.pub"
   echo ""
@@ -383,6 +384,10 @@ else
   info "Cloning PPVDA..."
   git clone --quiet https://github.com/baileywjohnson/ppvda.git "$REPO_DIR"
 fi
+# Tell the root-owned CI deploy hook (ppvda-deploy) where this checkout is.
+mkdir -p /etc/ppvda
+echo "$REPO_DIR" > /etc/ppvda/repo_dir
+chmod 644 /etc/ppvda/repo_dir
 cd "$REPO_DIR"
 
 # --- Check out the newest signed release ---
@@ -706,8 +711,9 @@ if [ "$HEALTHY" = "y" ]; then
   fi
 
   if [ -n "$DARKREEL_URL" ]; then
-    echo -e "  ${BOLD}Next step:${NC} Log in, go to Settings, and enter your Darkreel"
-    echo -e "  credentials (${DARKREEL_URL}) to enable encrypted uploads."
+    echo -e "  ${BOLD}Next step:${NC} In Darkreel (${DARKREEL_URL}), open Settings → Connected Apps"
+    echo -e "  and create an authorization code; paste it into PPVDA's Settings to enable"
+    echo -e "  encrypted uploads. Check the key fingerprint matches on both sides."
   else
     echo -e "  ${BOLD}Next step:${NC} Log in and paste a video URL to get started."
     echo -e "  To enable encrypted storage, set up a Darkreel server and"

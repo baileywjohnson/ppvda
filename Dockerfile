@@ -91,8 +91,8 @@ COPY package.json ./
 # create, remove or replace entries in it. The supervisor keeps the
 # WireGuard config (private key) in its own root-only /run/wg-supervisor.
 RUN groupadd -r ppvda && useradd -r -g ppvda -m ppvda \
-    && mkdir -p /app/downloads /app/tmp /app/data /run/ppvda \
-    && chown ppvda:ppvda /app/downloads /app/tmp /app/data \
+    && mkdir -p /app/downloads /app/data /run/ppvda \
+    && chown ppvda:ppvda /app/downloads /app/data \
     && chown root:ppvda /run/ppvda && chmod 0750 /run/ppvda
 
 # Entrypoint drops to the `ppvda` user in both Mullvad and non-Mullvad
@@ -105,7 +105,6 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV NODE_ENV=production
 ENV DOWNLOAD_DIR=/app/downloads
-ENV TEMP_DIR=/app/tmp
 
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

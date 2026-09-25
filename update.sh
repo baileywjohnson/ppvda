@@ -21,7 +21,8 @@
 #
 set -euo pipefail
 
-REPO_DIR="/opt/ppvda"
+# The checkout this script lives in (cron runs it by absolute path).
+REPO_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 ALLOWED_SIGNERS="/etc/ppvda/allowed_signers"
 CRON_FILE="/etc/cron.d/ppvda-update"
 LOG_FILE="/var/log/ppvda-update.log"

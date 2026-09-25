@@ -36,7 +36,9 @@ PPVDA_UID="$(id -u ppvda)"
 # supplies addresses: SO_PEERCRED can't tell Node apart from Chromium or
 # ffmpeg (same uid), so a caller-chosen IP would let any of them punch a hole
 # in the kill switch and learn the server's real IP. api.mullvad.net is
-# always included (device registration/removal, relay list).
+# always included (device registration/removal, relay list) — the
+# supervisor also fetches Mullvad's relay list from it at those pinned
+# addresses to check every BRINGUP peer is a genuine Mullvad relay.
 BYPASS_HOSTS="api.mullvad.net,${VPN_BYPASS_HOSTS:-}"
 
 # Start the supervisor in the background with its pid captured. The

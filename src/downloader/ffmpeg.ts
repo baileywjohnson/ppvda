@@ -153,6 +153,14 @@ export interface FfmpegResult {
  * { success: false } without throwing so callers can fall back to uploading
  * the original as non-fragmented.
  */
+// Cut fMP4 fragments at least every second, not only at keyframes. With a
+// long keyframe interval a single fragment can be several MB, and the
+// Darkreel upload would pad it alone into a 4 or 8 MiB ciphertext bucket;
+// one-second fragments pack into full 1 MiB chunks instead. Darkreel's own
+// browser remux also cuts by duration, so its player already handles
+// fragments that don't start on a keyframe.
+const FRAGMENT_DURATION_ARGS = ['-frag_duration', '1000000'];
+
 export async function remuxToFragmentedMP4(options: {
   inputPath: string;
   outputPath: string;
@@ -168,6 +176,7 @@ export async function remuxToFragmentedMP4(options: {
     ...input,
     '-c', 'copy',
     '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+    ...FRAGMENT_DURATION_ARGS,
     // Explicit: the output name has no media extension for ffmpeg to go by.
     '-f', 'mp4',
     outputPath,
@@ -205,6 +214,27 @@ const STDERR_HEAD_BYTES = 16 * 1024;
  * as ffmpeg prints its input banner.
  */
 export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
+  // HLS with MPEG-TS segments carries AAC as ADTS, which the mp4 muxer
+  // rejects ("Malformed AAC bitstream") unless it goes through
+  // aac_adtstoasc. The filter is a no-op for AAC that's already in MP4 form,
+  // but refuses any other audio codec — so try with it and, if ffmpeg says
+  // the codec isn't supported (reported while opening the output, before
+  // any data is fetched), run once more without it.
+  try {
+    return await runFfmpegOnce(options, AAC_ADTS_TO_ASC);
+  } catch (err) {
+    if (err instanceof FfmpegError && err.code === 'BSF_UNSUPPORTED') {
+      return runFfmpegOnce(options, []);
+    }
+    throw err;
+  }
+}
+
+const AAC_ADTS_TO_ASC = ['-bsf:a', 'aac_adtstoasc'];
+// How much of ffmpeg's most recent stderr to keep for diagnosing a failure.
+const STDERR_TAIL_BYTES = 4 * 1024;
+
+async function runFfmpegOnce(options: FfmpegOptions, extraOutputArgs: string[]): Promise<FfmpegResult> {
   const { inputUrl, outputPath, ffmpegPath, proxyConfig, timeoutMs = 300000, maxBytes, maxDurationSec, signal } = options;
 
   // Block non-HTTP protocols to prevent file://, gopher://, concat: etc.
@@ -226,9 +256,11 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
     '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     '-i', inputUrl,          // input URL
     '-c', 'copy',            // copy codecs (no re-encoding)
+    ...extraOutputArgs,
     // Fragmented MP4 — required for MSE playback in the Darkreel SPA viewer.
     // Matches the flags darkreel-cli and the in-browser mp4box remux produce.
     '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+    ...FRAGMENT_DURATION_ARGS,
     ...(maxBytes !== undefined ? ['-fs', String(maxBytes)] : []),
     ...(maxDurationSec !== undefined ? ['-t', String(maxDurationSec)] : []),
     outputPath,
@@ -243,6 +275,7 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
     });
 
     let head = '';
+    let tail = '';
     let bannerChecked = false;
     let durationSec: number | undefined;
     let settled = false;
@@ -266,6 +299,7 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
 
     proc.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
+      tail = (tail + text).slice(-STDERR_TAIL_BYTES);
 
       if (!bannerChecked) {
         head = (head + text).slice(0, STDERR_HEAD_BYTES);
@@ -301,7 +335,11 @@ export async function runFfmpeg(options: FfmpegOptions): Promise<FfmpegResult> {
     proc.on('close', (code) => {
       if (settled) return;
       if (code !== 0) {
-        settle(() => reject(new FfmpegError(`ffmpeg exited with code ${code}`, 'FFMPEG_PROCESS_ERROR')));
+        const bsfUnsupported = extraOutputArgs.length > 0
+          && /is not supported by the bitstream filter 'aac_adtstoasc'/.test(tail);
+        settle(() => reject(bsfUnsupported
+          ? new FfmpegError('audio codec not supported by aac_adtstoasc', 'BSF_UNSUPPORTED')
+          : new FfmpegError(`ffmpeg exited with code ${code}`, 'FFMPEG_PROCESS_ERROR')));
         return;
       }
       // Exit 0 also covers "stopped at -fs/-t". Treat reaching either cap as

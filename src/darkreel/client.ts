@@ -1,5 +1,6 @@
 import { createCipheriv, randomBytes, randomUUID } from 'node:crypto';
-import { stat, open, unlink } from 'node:fs/promises';
+import { stat, open } from 'node:fs/promises';
+import { secureUnlink } from '../utils/fs.js';
 import { basename, join, dirname } from 'node:path';
 import { encryptBlock } from '../crypto/index.js';
 import { seal } from './crypto.js';
@@ -176,7 +177,9 @@ export async function uploadFile(opts: UploadFileOptions): Promise<void> {
       if (result.success) {
         uploadPath = remuxPath;
         fragmented = true;
-        cleanupRemux = async () => { await unlink(remuxPath).catch(() => {}); };
+        // A full plaintext copy of the media: overwrite before unlinking,
+        // like every other staged file.
+        cleanupRemux = () => secureUnlink(remuxPath);
       } else {
         // Remux unavailable — upload as-is so the file is at least saved.
         // The SPA falls back to blob playback (download-then-play) for

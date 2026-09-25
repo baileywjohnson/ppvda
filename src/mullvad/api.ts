@@ -206,7 +206,8 @@ export function findRelay(
 
   let city: RelayCity;
   if (cityCode) {
-    const found = country.cities.find((c) => c.code === cityCode);
+    // City codes are stored as the full location code ("se-mma").
+    const found = country.cities.find((c) => c.code === `${countryCode}-${cityCode}`);
     if (!found) {
       const available = country.cities.map((c) => `${c.code} (${c.name})`).join(', ');
       throw new Error(`City "${cityCode}" not found in ${country.name}. Available: ${available}`);
